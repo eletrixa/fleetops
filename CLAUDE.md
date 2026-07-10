@@ -10,11 +10,11 @@ tokenomics is per-**account**.
 
 ## Status
 
-**Pre-architecture.** Stack decree: Rust + ratatui, same shape as tokenomics. The architecture
-dossier lives in `plans/001-*` (oh-architecture output); specs and code follow it. Verified data
-sources so far: `docs/RESEARCH.md`.
+**Wave 1 shipped** (spec 001 — wezterm lens: pane board + jump). Architecture: Option A "sensor
+fusion" per the dossier in `plans/001-*`; waves 2–4 add sessions/ + JSONL + /proc sensors and the
+status fold. Verified data sources: `docs/RESEARCH.md`.
 
-## Tech Stack (decreed, details pending dossier)
+## Tech Stack
 
 | Layer | Technology |
 |-------|-----------|
@@ -25,7 +25,9 @@ sources so far: `docs/RESEARCH.md`.
 ## Commands
 
 ```bash
-./check.sh   # THE GATE: fmt --check + clippy -D warnings + test (must be green)
+./check.sh              # THE GATE: fmt --check + clippy -D warnings + test (must be green)
+cargo run               # launch the board
+cargo build --release   # -> target/release/fleet
 ```
 
 ## Rules

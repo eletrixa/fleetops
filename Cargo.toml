@@ -1,0 +1,44 @@
+[package]
+name = "fleetops"
+version = "0.1.0"
+edition = "2021"
+description = "Fleetops — a TUI monitoring all running Claude Code sessions (the fleet)"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "fleet"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+# unreachable_pub intentionally omitted: bin crate (no lib consumers) — it would demand
+# pub(crate) on every item, pure noise. Visibility discipline is covered by review.
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+# Curated allows — each justified:
+module_name_repetitions = "allow"   # panes::PaneRow reads fine
+missing_errors_doc = "allow"        # error enums are self-describing in this crate
+missing_panics_doc = "allow"        # panics are limited to test code
+must_use_candidate = "allow"        # bin crate, not a public library API
+doc_markdown = "allow"              # prose docs reference tool/format names (wezterm, JSON) freely
+
+[profile.release]
+strip = true
+lto = "thin"
+
+# Dependencies are added per-wave as first used (spec-driven TDD); every dependency is
+# justified by a landed feature. All wave-1 (spec 001).
+[dependencies]
+async-trait = "0.1"                                             # W1: object-safe async Runner seam
+crossterm = { version = "0.29", features = ["event-stream"] }   # W1: terminal backend + async key events
+futures = "0.3"                                                 # W1: EventStream::next in the TUI loop
+ratatui = "0.29"                                                # W1: the board
+serde = { version = "1", features = ["derive"] }                # W1: wezterm cli list JSON
+serde_json = "1"                                                # W1: wezterm cli list JSON
+thiserror = "2"                                                 # W1: AppError
+tokio = { version = "1", features = ["rt-multi-thread", "process", "time", "sync", "macros"] } # W1: runtime, sensor task, timeouts
