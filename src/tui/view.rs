@@ -10,7 +10,8 @@
 //!   account | age | tab (tab-bar position) | pane.
 //! - Stable per-account color (hash into a 6-color palette); stable per-dir emoji+color badge
 //!   (two independently-seeded hashes); status color from one pure map.
-//! - Footer: session count, needs-answer count, refresh age, key hints, last error.
+//! - Footer: session count, needs-answer count, refresh age, key hints, last error, and a
+//!   `· N codex` suffix when live Codex rows are folded into the sweep (spec 008).
 //!
 //! Design constraints:
 //! - Pure and read-only over `App`: no I/O, no `.await`, no state mutation (ratatui rule).
@@ -188,16 +189,22 @@ fn render_table(f: &mut Frame<'_>, area: Rect, app: &App) {
         };
         let dir = dir_name(&r.cwd);
         let (dir_emoji, dir_color) = dir_badge(dir);
-        let (ctx_cell, tok) = r.context_tokens.map_or_else(
-            || (Cell::from("—"), "—".to_string()),
-            |t| {
-                let pct = ctx_used_pct(t);
-                (
-                    Cell::from(ctx_bar(pct)).style(ctx_style(pct)),
-                    format_tokens(t),
-                )
-            },
+        // ctx% seam (spec 008): `ctx_pct` is the source of truth (Claude and Codex windows
+        // differ, so the bar must never re-derive Codex tokens through Claude's 200k/1M
+        // inference) — falling back to `ctx_used_pct(context_tokens)` only covers a row built
+        // without going through `board::assemble` (which always sets `ctx_pct` when tokens
+        // are known).
+        let pct = r
+            .ctx_pct
+            .map(u64::from)
+            .or_else(|| r.context_tokens.map(ctx_used_pct));
+        let ctx_cell = pct.map_or_else(
+            || Cell::from("—"),
+            |pct| Cell::from(ctx_bar(pct)).style(ctx_style(pct)),
         );
+        let tok = r
+            .context_tokens
+            .map_or_else(|| "—".to_string(), format_tokens);
         let age_cell = r.secs_since_append.map_or_else(
             || Cell::from("—"),
             |secs| Cell::from(format_age(secs)).style(age_style(secs)),
@@ -259,8 +266,14 @@ fn render_footer(f: &mut Frame<'_>, area: Rect, app: &App) {
     } else {
         String::new()
     };
+    // Codex rows aren't tallied in `ScanStats.live` (Claude-only) — spec 008 surfaces them here.
+    let codex_suffix = if app.codex_count > 0 {
+        format!(" · {} codex", app.codex_count)
+    } else {
+        String::new()
+    };
     let stats = format!(
-        "{dir_warn}{parse_warn}{} live · {} need answer · {} stale files · refreshed {}s ago",
+        "{dir_warn}{parse_warn}{} live · {} need answer · {} stale files · refreshed {}s ago{codex_suffix}",
         app.stats.live, needs, app.stats.stale_dead, app.refresh_age_secs
     );
     // Spec 004: stats PLUS the error — an error must not hide the freshness/counts.
@@ -292,6 +305,7 @@ mod tests {
             status,
             cwd: "/tui/fleetops".to_string(),
             context_tokens: tokens,
+            ctx_pct: None,
             secs_since_append: Some(75),
             pane: Some(crate::board::MatchedPane {
                 socket: String::new(),
@@ -499,5 +513,30 @@ mod tests {
             .expect("badge emoji rendered in the DIR cell");
         let name_pos = row_line.find("fleetops").expect("dir name rendered");
         assert!(emoji_pos < name_pos, "badge emoji precedes the dir name");
+    }
+
+    #[test]
+    fn codex_row_renders_account_and_ctx_bar_from_ctx_pct() {
+        // spec 008 ctx% seam: the bar must come from `ctx_pct`, not `context_tokens` run back
+        // through `ctx_used_pct` — 50k/200k would render 25% (3 blocks); ctx_pct=60 must win.
+        let mut r = row(
+            "codex-1",
+            Status::Working,
+            "codex — no prompt yet",
+            Some(50_000),
+        );
+        r.account = Some("codex".to_string());
+        r.ctx_pct = Some(60);
+        let mut app = App::default();
+        app.update(Msg::Snapshot(Box::new(Snapshot {
+            rows: vec![r],
+            ..Snapshot::default()
+        })));
+        let screen = rendered(&app);
+        assert!(screen.contains("codex"), "ACCT shows the codex label");
+        assert!(
+            screen.contains("██████░░░░"),
+            "ctx bar must be computed from ctx_pct (60%), not context_tokens' own ctx_used_pct"
+        );
     }
 }

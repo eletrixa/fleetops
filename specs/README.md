@@ -12,3 +12,4 @@ Waves are defined by the architecture dossier in `plans/001-*`.
 | 5 | [005-wave5-wslenv-pane-identity](005-wave5-wslenv-pane-identity.md) | ✅ done (full effect after wezterm restart) |
 | 6 | [006-wave6-pane-highlight](006-wave6-pane-highlight.md) | ✅ done |
 | 7 | [007-wave7-dir-first-badges](007-wave7-dir-first-badges.md) | ✅ done |
+| 8 | [008-wave8-codex-lane](008-wave8-codex-lane.md) | ✅ done |

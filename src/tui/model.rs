@@ -55,6 +55,10 @@ pub struct Snapshot {
     pub stats: ScanStats,
     /// A degraded lane (e.g. wezterm unreachable) — rows are still valid.
     pub lane_error: Option<String>,
+    /// Live Codex TUI rows folded into `rows` this sweep — the footer appends `· N codex` when
+    /// this is > 0 (spec 008; Codex rows aren't counted in `ScanStats.live`, which is
+    /// Claude-only).
+    pub codex_count: usize,
 }
 
 /// Everything the event loop can feed the model.
@@ -77,6 +81,8 @@ pub struct App {
     pub rows: Vec<SessionRow>,
     /// Latest scan tallies.
     pub stats: ScanStats,
+    /// Live Codex rows in the latest snapshot — the footer's `· N codex` suffix (spec 008).
+    pub codex_count: usize,
     /// Selected session's id (survives refreshes); `None` when the board is empty.
     pub selected: Option<String>,
     /// Seconds since the last successful sweep.
@@ -132,6 +138,7 @@ impl App {
                     .collect();
                 self.rows = snapshot.rows;
                 self.stats = snapshot.stats;
+                self.codex_count = snapshot.codex_count;
                 self.refresh_age_secs = 0;
                 self.error = snapshot.lane_error;
                 self.reselect(old_index);
@@ -310,6 +317,7 @@ mod tests {
             status,
             cwd: "/tui/x".to_string(),
             context_tokens: Some(50_000),
+            ctx_pct: None,
             secs_since_append: Some(3),
             pane: pane.map(|(tab_id, pane_id)| MatchedPane {
                 socket: String::new(),

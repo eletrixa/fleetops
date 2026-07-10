@@ -7,9 +7,10 @@
 //!
 //! Key responsibilities:
 //! - Resolve the unified Claude dir (`~/.claude` — all accounts symlink into it, recon D2).
+//! - Resolve the Codex CLI state dir (`~/.codex`, spec 008) — same override/default shape.
 //!
 //! Design constraints:
-//! - `FLEET_CLAUDE_DIR` overrides for dev/testing against a fixture tree.
+//! - `FLEET_CLAUDE_DIR` / `FLEET_CODEX_DIR` override for dev/testing against a fixture tree.
 
 use std::path::PathBuf;
 
@@ -22,6 +23,16 @@ pub fn claude_dir() -> PathBuf {
     home.join(".claude")
 }
 
+/// The Codex CLI state dir: `$FLEET_CODEX_DIR` override, else `$HOME/.codex` (spec 008;
+/// mirrors `claude_dir()`'s override/default convention exactly).
+pub fn codex_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("FLEET_CODEX_DIR") {
+        return PathBuf::from(dir);
+    }
+    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
+    home.join(".codex")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -32,6 +43,13 @@ mod tests {
         // just assert the default shape.
         if std::env::var_os("FLEET_CLAUDE_DIR").is_none() {
             assert!(claude_dir().ends_with(".claude"));
+        }
+    }
+
+    #[test]
+    fn default_is_home_codex() {
+        if std::env::var_os("FLEET_CODEX_DIR").is_none() {
+            assert!(codex_dir().ends_with(".codex"));
         }
     }
 }

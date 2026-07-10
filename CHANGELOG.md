@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- **Wave 8 (spec 008): Codex CLI sessions on the board** — the fleet now also shows Codex TUI
+  sessions (`~/.codex`) alongside Claude ones: same columns, same sort buckets, same Enter-jump
+  and pane highlighting. Discovery recognizes a live Codex TUI by `/proc` facts (`comm ==
+  "codex"`, argv0-only cmdline, `fd/1 -> /dev/pts/*` — the node shim and `codex exec`/
+  `--version` are skipped for free) and joins it to its newest same-cwd rollout
+  (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`) without a sqlite dependency: a liveness guard
+  rejects a rollout older than the process's own start minus a 600 s slack, and two live
+  processes sharing a cwd never join (never guess which rollout is whose — `codex — session
+  ambiguous`). SESSION name is the last `user_message`, truncated to 60 chars (`codex — no
+  prompt yet` pre-first-prompt). CTX/TOK come from the rollout's own `token_count` line against
+  its own `model_context_window` — never Claude's 200k/1M inference. Footer appends `· N codex`
+  when N > 0 (Codex rows aren't tallied in the Claude-only live count). `SessionRow` gains a
+  `ctx_pct` field as the ctx% seam between the two lanes; `board::sort_rows` is now a standalone
+  function so the sweep can concatenate Claude + Codex rows and sort once.
 - **Wave 7 (spec 007): DIR up front, with a project badge** — column order is now
   `STATUS | DIR | SESSION | CTX | TOK | ACCT | AGE | TAB | PANE` (DIR moved next to STATUS,
   ahead of SESSION). The DIR cell renders `<emoji> <dir_name>`, colored — a pure hash

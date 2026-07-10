@@ -3,13 +3,15 @@
 //! Project: Fleetops — TUI monitoring all running Claude Code sessions (the fleet)
 //! Module:  src/tui/mod.rs
 //! Deps:    ratatui (init/restore + panic hook), crossterm (EventStream), tokio;
-//!          discovery, telemetry, board, panes, runner, paths
-//! Tested:  the seams are tested in keys/model/view/board/…; this loop is the thin I/O shell.
+//!          discovery, telemetry, board, codex, panes, runner, paths
+//! Tested:  the seams are tested in keys/model/view/board/codex/…; this loop is the thin I/O shell.
 //!
 //! Key responsibilities:
 //! - Own the terminal (via `ratatui::try_init`/`try_restore` — installs the panic hook) and the loop.
 //! - `sweep`: one sensor pass — wezterm list (async, bounded) + sessions scan + transcript tails
-//!   (blocking fs via `spawn_blocking`) → assembled `Snapshot` over the mpsc channel.
+//!   (blocking fs via `spawn_blocking`) → Claude rows assembled, Codex rows appended
+//!   (`codex::scan`), the concatenation sorted once (`board::sort_rows`) → `Snapshot` over the
+//!   mpsc channel (spec 008).
 //!
 //! Design constraints:
 //! - Async work never runs on the UI task — sweeps and jumps are spawned; the loop only `select!`s.
@@ -31,7 +33,7 @@ use crate::error::AppResult;
 use crate::panes::PaneCache;
 use crate::runner::{Exec, Runner};
 use crate::telemetry::TailCache;
-use crate::{board, discovery, highlight, panes, paths};
+use crate::{board, codex, discovery, highlight, panes, paths};
 
 use model::{App, Msg, Snapshot};
 
@@ -177,11 +179,21 @@ async fn sweep(runner: &dyn Runner, cache: &Arc<Mutex<SweepCaches>>) -> Result<S
         guard.tails.retain(&live_ids);
         let (pane_rows, lane_error) = guard.panes.fold(panes_result);
         drop(guard); // release the caches before the (allocating) assemble
+        let mut rows = board::assemble(&sessions, &telemetry, &pane_rows);
+        let codex_rows = codex::scan(
+            &paths::codex_dir(),
+            std::path::Path::new("/proc"),
+            &pane_rows,
+        );
+        let codex_count = codex_rows.len();
+        rows.extend(codex_rows);
+        board::sort_rows(&mut rows);
         Snapshot {
             seq: 0, // stamped by spawn_sweep
-            rows: board::assemble(&sessions, &telemetry, &pane_rows),
+            rows,
             stats,
             lane_error,
+            codex_count,
         }
     })
     .await

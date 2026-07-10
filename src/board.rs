@@ -18,7 +18,7 @@
 use crate::discovery::LiveSession;
 use crate::fold::{self, Status};
 use crate::panes::PaneRow;
-use crate::telemetry::Telemetry;
+use crate::telemetry::{self, Telemetry};
 
 /// One board row — a live session with everything the view renders.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +35,9 @@ pub struct SessionRow {
     pub cwd: String,
     /// Context tokens (statusline recipe); `None` = no transcript yet.
     pub context_tokens: Option<u64>,
+    /// Context percent used — Claude: `telemetry::ctx_used_pct`'s recipe; Codex:
+    /// `total * 100 / model_context_window` (spec 008 ctx% seam). `None` = no telemetry yet.
+    pub ctx_pct: Option<u8>,
     /// Seconds since the transcript last grew.
     pub secs_since_append: Option<u64>,
     /// Matched wezterm pane — the jump target.
@@ -145,6 +148,9 @@ pub fn assemble(
                 status,
                 cwd: session.file.cwd.clone(),
                 context_tokens: facts.context_tokens,
+                ctx_pct: facts
+                    .context_tokens
+                    .map(|t| clamp_pct_u8(telemetry::ctx_used_pct(t))),
                 secs_since_append: tel.secs_since_append,
                 pane,
                 pane_ambiguous,
@@ -158,12 +164,24 @@ pub fn assemble(
             }
         })
         .collect();
+    sort_rows(&mut rows);
+    rows
+}
+
+/// Clamp a ctx% (0..=100+ from `telemetry::ctx_used_pct`, unbounded on hostile input) into the
+/// row's `u8` field — never panics on an absurd usage value (tolerant-parser invariant).
+fn clamp_pct_u8(pct: u64) -> u8 {
+    u8::try_from(pct.min(u64::from(u8::MAX))).unwrap_or(u8::MAX)
+}
+
+/// Sort assembled rows: attention buckets first, then by name — extracted so a sweep can
+/// concatenate Claude + Codex rows and sort once (spec 008).
+pub fn sort_rows(rows: &mut [SessionRow]) {
     rows.sort_by(|a, b| {
         fold::sort_key(a.status)
             .cmp(&fold::sort_key(b.status))
             .then_with(|| a.name.cmp(&b.name))
     });
-    rows
 }
 
 /// Last path segment for display: `/home/user/work/brain` → `brain`; `/` → `/`.
@@ -423,6 +441,46 @@ mod tests {
             pts_of("s2"),
             None,
             "no wezterm_pane -> never highlightable, pts withheld"
+        );
+    }
+
+    fn minimal_row(id: &str, status: Status) -> SessionRow {
+        SessionRow {
+            session_id: id.to_string(),
+            name: id.to_string(),
+            account: None,
+            status,
+            cwd: String::new(),
+            context_tokens: None,
+            ctx_pct: None,
+            secs_since_append: None,
+            pane: None,
+            pane_ambiguous: false,
+            pts: None,
+        }
+    }
+
+    #[test]
+    fn sort_rows_interleaves_codex_and_claude_rows_by_status_bucket() {
+        // A concatenated Claude+Codex sweep (spec 008: rows carry no origin marker — the sort
+        // must bucket purely on `status`, regardless of which sensor produced the row).
+        let mut rows = vec![
+            minimal_row("codex-idle", Status::Idle),
+            minimal_row("claude-ask", Status::NeedsAnswer),
+            minimal_row("codex-working", Status::Working),
+            minimal_row("claude-stalled", Status::Stalled),
+        ];
+        sort_rows(&mut rows);
+        let ids: Vec<&str> = rows.iter().map(|r| r.session_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "claude-ask",
+                "claude-stalled",
+                "codex-working",
+                "codex-idle"
+            ],
+            "attention buckets first, Claude/Codex interleaved by status alone"
         );
     }
 }
