@@ -178,18 +178,20 @@ impl App {
             let Some(pts) = row.pts.clone() else {
                 continue; // no pts — never highlightable (headless/non-wezterm session)
             };
-            let id = row.session_id.clone();
-            let prev_status = prev_statuses.get(&id).copied();
+            // `id` stays borrowed for the lookups below; only cloned at the point a new
+            // `tint_state` entry is actually inserted (most rows are steady, no-op sweeps).
+            let id = row.session_id.as_str();
+            let prev_status = prev_statuses.get(id).copied();
             let current_tint = self
                 .tint_state
-                .get(&id)
+                .get(id)
                 .map_or(Tint::None, |(tint, _)| *tint);
 
             let just_finished = prev_status == Some(Status::Working) && row.status == Status::Idle;
             if just_finished {
                 self.pending_highlights
                     .push(HighlightCmd::Pulse { pts: pts.clone() });
-                self.tint_state.insert(id, (Tint::Green, pts));
+                self.tint_state.insert(id.to_string(), (Tint::Green, pts));
                 continue;
             }
             if row.status == Status::Idle && current_tint == Tint::Green {
@@ -212,13 +214,17 @@ impl App {
                 tint: desired,
             });
             if desired == Tint::None {
-                self.tint_state.remove(&id);
+                self.tint_state.remove(id);
             } else {
-                self.tint_state.insert(id, (desired, pts));
+                self.tint_state.insert(id.to_string(), (desired, pts));
             }
         }
 
         let live_ids: HashSet<&str> = self.rows.iter().map(|r| r.session_id.as_str()).collect();
+        // A pane can be reused within one sweep: the vanished session's pts may now belong to a
+        // live row (new session_id, same pts) already handled above — that row's own write owns
+        // this pts this batch, so a reset here would race it with no ordering guarantee.
+        let live_pts: HashSet<&str> = self.rows.iter().filter_map(|r| r.pts.as_deref()).collect();
         let vanished: Vec<(String, String)> = self
             .tint_state
             .iter()
@@ -226,10 +232,12 @@ impl App {
             .map(|(id, (_, pts))| (id.clone(), pts.clone()))
             .collect();
         for (id, pts) in vanished {
-            self.pending_highlights.push(HighlightCmd::Steady {
-                pts,
-                tint: Tint::None,
-            });
+            if !live_pts.contains(pts.as_str()) {
+                self.pending_highlights.push(HighlightCmd::Steady {
+                    pts,
+                    tint: Tint::None,
+                });
+            }
             self.tint_state.remove(&id);
         }
     }
@@ -489,7 +497,7 @@ mod tests {
         assert!(app.should_quit);
     }
 
-    // --- spec 006: pane-highlight transition table (RED phase — model logic not wired yet) ---
+    // --- spec 006: pane-highlight transition table ---
 
     #[test]
     fn finish_transition_emits_pulse() {
@@ -689,6 +697,37 @@ mod tests {
                 .as_deref()
                 .is_some_and(|e| e.contains("no pane matched")),
             "jump failure still reported"
+        );
+    }
+
+    #[test]
+    fn pts_reused_by_a_new_session_suppresses_the_vanished_sessions_reset() {
+        let mut app = App::default();
+        // "old" tints amber on pts/12.
+        app.update(snapshot(vec![row_full(
+            "old",
+            None,
+            false,
+            Status::NeedsAnswer,
+            Some("/dev/pts/12"),
+        )]));
+        app.pending_highlights.clear();
+        // Same sweep: "old" vanished, but a NEW session_id now claims the same pts (pane reuse)
+        // with its own tint-emitting status.
+        app.update(snapshot(vec![row_full(
+            "new",
+            None,
+            false,
+            Status::Stalled,
+            Some("/dev/pts/12"),
+        )]));
+        assert_eq!(
+            app.pending_highlights,
+            vec![HighlightCmd::Steady {
+                pts: "/dev/pts/12".to_string(),
+                tint: Tint::Red
+            }],
+            "only the new session's command fires — the vanished session's reset must not race it"
         );
     }
 

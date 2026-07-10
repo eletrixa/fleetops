@@ -42,7 +42,7 @@ use crate::discovery;
 use crate::fold::{self, Status};
 use crate::panes::PaneRow;
 
-/// `session_meta` line 0 of a rollout — tolerant, unknown fields skipped (GREEN).
+/// `session_meta` line 0 of a rollout — tolerant, unknown fields skipped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionMeta {
     /// The rollout's session uuid.
@@ -87,11 +87,11 @@ pub struct RolloutFacts {
     pub tokens: Option<u64>,
     /// `total * 100 / model_context_window` from that same line.
     pub ctx_pct: Option<u8>,
-    /// Last `user_message` text, truncated to 60 chars — the semantic name.
+    /// Last `user_message` text's first line, truncated to 60 chars — the semantic name.
     pub name: Option<String>,
 }
 
-/// Fold a rollout tail (last 64 KiB) into status/tokens/ctx%/name. `age_secs` is the rollout
+/// Fold a rollout tail (last `TAIL_BYTES`) into status/tokens/ctx%/name. `age_secs` is the rollout
 /// file's mtime age — Working vs Stalled hinges on it, exactly like `fold::STALL_AFTER_SECS`.
 /// Tolerant: garbage/unknown lines are skipped, never fatal (spec 008 status table).
 pub fn fold_rollout_tail(bytes: &[u8], age_secs: Option<u64>) -> RolloutFacts {
@@ -135,7 +135,12 @@ pub fn fold_rollout_tail(bytes: &[u8], age_secs: Option<u64>) -> RolloutFacts {
                         if let Some(text) =
                             value.pointer("/payload/message").and_then(Value::as_str)
                         {
-                            name = Some(text.chars().take(60).collect());
+                            // First line only — an embedded newline (pasted code, a multi-line
+                            // prompt) must never reach the name (spec 008).
+                            name = text
+                                .lines()
+                                .next()
+                                .map(|line| line.chars().take(60).collect());
                         }
                     }
                     _ => {}
@@ -198,7 +203,7 @@ pub struct CodexProc {
     /// `/proc/<pid>/cwd` readlink target.
     pub cwd: String,
     /// Wallclock seconds the process started: `btime + starttime/HZ` (the join liveness guard
-    /// baseline; `HZ` is hardcoded at 100 for this WSL2 kernel in GREEN — a wrong value only
+    /// baseline; `HZ` is hardcoded at 100 for this WSL2 kernel — a wrong value only
     /// loosens the guard, degrading to newest-per-cwd).
     pub start_wallclock_secs: u64,
 }
@@ -244,8 +249,10 @@ pub fn join_rollouts<'a>(
 
 /// Cap on rollout files scanned per sweep — bounds cost as `~/.codex/sessions` accumulates.
 const MAX_ROLLOUTS: usize = 300;
-/// Rollout tail read window — same recipe as `telemetry`'s transcript tail (spec 008).
-const TAIL_BYTES: u64 = 64 * 1024;
+/// Rollout tail read window — matches `telemetry`'s transcript tail window (256 KiB). A single
+/// codex turn can stream well over 64 KiB of `response_item` output, which would push the last
+/// `user_message` line out of a smaller window and cost the row its name.
+const TAIL_BYTES: u64 = 256 * 1024;
 /// WSL2 clock ticks/sec (HZ) — hardcoded per recon; a wrong value only loosens the join guard
 /// (degrading to newest-per-cwd), never rejects a live process.
 const HZ: u64 = 100;
@@ -350,20 +357,31 @@ fn read_proc_info(proc_root: &Path, pid: u32, btime: u64) -> Option<ProcInfo> {
     })
 }
 
-/// Walk `codex_root/sessions/*/*/*/rollout-*.jsonl`, newest-first by filename, capped, parsed
-/// into join candidates + a session-id -> path index (for the tail read once joined).
+/// Walk `codex_root/sessions/*/*/*/rollout-*.jsonl`, newest-first by MTIME, capped, parsed into
+/// join candidates + a session-id -> path index (for the tail read once joined).
+///
+/// Sorted by mtime, not filename (which encodes session START time, not last-write): a
+/// long-running session's rollout is appended to continuously, so its mtime stays fresh even
+/// as its filename ages — sorting by filename would eventually truncate it out of the cap and
+/// it could never join again. Mtime-descending is the only ordering under which an
+/// actively-appended rollout never ages out.
+///
+/// ponytail: no cache — every file is re-stat'd every sweep. Fine at the current cap (300);
+/// mirror `TailCache`'s (size, mtime) keying here if a growing `~/.codex/sessions` makes this
+/// sweep measurably slow.
 fn scan_rollouts(codex_root: &Path) -> (Vec<RolloutCandidate>, HashMap<String, PathBuf>) {
-    let mut files = Vec::new();
-    collect_rollout_files(&codex_root.join("sessions"), &mut files);
-    files.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+    let mut paths_only = Vec::new();
+    collect_rollout_files(&codex_root.join("sessions"), &mut paths_only);
+    let mut files: Vec<(PathBuf, u64)> = paths_only
+        .into_iter()
+        .filter_map(|p| mtime_epoch_secs(&p).map(|mtime| (p, mtime)))
+        .collect();
+    files.sort_by_key(|(_, mtime)| std::cmp::Reverse(*mtime));
     files.truncate(MAX_ROLLOUTS);
 
     let mut candidates = Vec::new();
     let mut paths = HashMap::new();
-    for path in files {
-        let Some(mtime_secs) = mtime_epoch_secs(&path) else {
-            continue;
-        };
+    for (path, mtime_secs) in files {
         let Some(meta) = read_session_meta_line(&path) else {
             continue;
         };
@@ -483,9 +501,10 @@ fn build_row(
 
     SessionRow {
         session_id: candidate.session_id.clone(),
-        name: facts
-            .name
-            .unwrap_or_else(|| "codex — no prompt yet".to_string()),
+        // A row that joined a rollout but whose tail hasn't seen a `user_message` yet is
+        // mid-conversation (the rollout exists, the process is live) — "no prompt yet" is
+        // reserved for the unjoined placeholder above; this must never claim there's no prompt.
+        name: facts.name.unwrap_or_else(|| "codex (untitled)".to_string()),
         account: Some("codex".to_string()),
         status: facts.status,
         cwd: proc.cwd.clone(),
@@ -667,6 +686,15 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fold_last_user_message_uses_only_the_first_line() {
+        // A multi-line prompt (e.g. pasted code) must never leak its second+ lines into the
+        // name (spec 008) — `\\n` here is the JSON-escaped newline, i.e. a real '\n' once parsed.
+        let tail = user_message_line("first line\\nsecond line should never appear");
+        let facts = fold_rollout_tail(tail.as_bytes(), Some(5));
+        assert_eq!(facts.name.as_deref(), Some("first line"));
+    }
+
     // --- join_rollouts ---
 
     const SLACK_SECS: u64 = 600; // spec 008: the join liveness guard window
@@ -806,6 +834,54 @@ mod tests {
             "matched via WEZTERM_PANE=27"
         );
         assert_eq!(row.status, Status::Idle, "task_complete tail");
+        assert_eq!(
+            row.name, "codex (untitled)",
+            "joined rollout with no user_message yet must not read \"no prompt yet\" — the \
+             session IS mid-conversation, that label is reserved for no-rollout-joined rows"
+        );
+    }
+
+    #[test]
+    fn scan_rollouts_orders_by_mtime_not_filename_so_a_long_running_session_survives_the_cap() {
+        let tmp = std::env::temp_dir().join(format!(
+            "fleet-codex-rollout-mtime-cap-{}",
+            std::process::id()
+        ));
+        let codex_root = tmp.join("codex");
+
+        // A long-running session: its filename encodes an OLD start (2020, sorts last
+        // alphabetically among 2026-dated filler rollouts) but it's still being appended to, so
+        // its mtime is the freshest of all. Filename-descending sort would truncate it out of
+        // MAX_ROLLOUTS; mtime-descending must keep it.
+        let old_dir = codex_root.join("sessions/2020/01/01");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        std::fs::write(
+            old_dir.join("rollout-2020-01-01T00-00-00-long-running.jsonl"),
+            r#"{"timestamp":"2020-01-01T00:00:00Z","type":"session_meta","payload":{"id":"long-running","cwd":"/a","originator":"codex-tui","cli_version":"0.144.1","source":"cli"}}"#,
+        )
+        .unwrap();
+        let old_path = old_dir.join("rollout-2020-01-01T00-00-00-long-running.jsonl");
+        let bumped = std::fs::metadata(&old_path).unwrap().modified().unwrap()
+            + std::time::Duration::from_hours(1);
+        std::fs::File::open(&old_path)
+            .unwrap()
+            .set_modified(bumped)
+            .unwrap();
+
+        // MAX_ROLLOUTS filler rollouts, all dated 2026 (newer filename than the long-running
+        // one), filling the cap.
+        for i in 0..MAX_ROLLOUTS {
+            write_rollout(&codex_root, &format!("filler-{i:04}"), "/a", &[]);
+        }
+
+        let (candidates, _) = scan_rollouts(&codex_root);
+        std::fs::remove_dir_all(&tmp).ok();
+
+        assert_eq!(candidates.len(), MAX_ROLLOUTS, "cap still enforced");
+        assert!(
+            candidates.iter().any(|c| c.session_id == "long-running"),
+            "the freshest-mtime rollout must survive the cap despite its old filename"
+        );
     }
 
     #[test]

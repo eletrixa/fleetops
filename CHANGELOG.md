@@ -16,6 +16,14 @@
   when N > 0 (Codex rows aren't tallied in the Claude-only live count). `SessionRow` gains a
   `ctx_pct` field as the ctx% seam between the two lanes; `board::sort_rows` is now a standalone
   function so the sweep can concatenate Claude + Codex rows and sort once.
+  - **Review fixes**: quit always resets pane tints, even when the event stream dies (cleanup no
+    longer bypassed by an early return); Codex rollout cap now sorts by mtime (a long-running
+    session's rollout can no longer age out of the cap by filename); rollout tail window raised
+    64 KiB → 256 KiB to match telemetry's; a joined rollout with no prompt yet in its tail reads
+    "codex (untitled)", not the misleading "no prompt yet"; the Codex ctx% bar never falls back
+    through Claude's 200k/1M inference (renders "—" instead); a pane reused by a new session
+    within one sweep no longer races the old session's tint reset against the new one's write;
+    Codex session names take only the prompt's first line before truncating to 60 chars.
 - **Wave 7 (spec 007): DIR up front, with a project badge** — column order is now
   `STATUS | DIR | SESSION | CTX | TOK | ACCT | AGE | TAB | PANE` (DIR moved next to STATUS,
   ahead of SESSION). The DIR cell renders `<emoji> <dir_name>`, colored — a pure hash

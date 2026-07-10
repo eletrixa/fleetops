@@ -139,8 +139,10 @@ async fn write_escape(pts: String, bytes: Vec<u8>) {
 
 /// Apply a batch of highlight commands, each detached on its own tokio task — commands apply
 /// concurrently, so a `Pulse`'s ~1 s of frame sleeps never delays a `Steady` write for another
-/// pane in the same batch. Different cmds never target the same pts within one batch (the model
-/// dedups per session), so per-cmd tasks never race each other's writes.
+/// pane in the same batch. Different cmds never target the same pts within one batch: the model
+/// dedups per session, AND `update_highlights` suppresses a vanished session's reset when its
+/// pts is reclaimed by a live row within the same sweep (pane reuse) — so per-cmd tasks never
+/// race each other's writes.
 ///
 /// ponytail: a pulse in flight isn't cancellable — a reset landing mid-pulse (reachable only via
 /// a manual-refresh sweep firing <1 s after a finish) can be overwritten by the pulse's

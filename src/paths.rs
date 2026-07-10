@@ -14,23 +14,24 @@
 
 use std::path::PathBuf;
 
-/// The unified Claude state dir: `$FLEET_CLAUDE_DIR` override, else `$HOME/.claude`.
-pub fn claude_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("FLEET_CLAUDE_DIR") {
+/// Shared override/default recipe for both state dirs: `$env_var` if set, else `$HOME/<dirname>`.
+fn resolve_dir(env_var: &str, dirname: &str) -> PathBuf {
+    if let Some(dir) = std::env::var_os(env_var) {
         return PathBuf::from(dir);
     }
     let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
-    home.join(".claude")
+    home.join(dirname)
+}
+
+/// The unified Claude state dir: `$FLEET_CLAUDE_DIR` override, else `$HOME/.claude`.
+pub fn claude_dir() -> PathBuf {
+    resolve_dir("FLEET_CLAUDE_DIR", ".claude")
 }
 
 /// The Codex CLI state dir: `$FLEET_CODEX_DIR` override, else `$HOME/.codex` (spec 008;
 /// mirrors `claude_dir()`'s override/default convention exactly).
 pub fn codex_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("FLEET_CODEX_DIR") {
-        return PathBuf::from(dir);
-    }
-    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
-    home.join(".codex")
+    resolve_dir("FLEET_CODEX_DIR", ".codex")
 }
 
 #[cfg(test)]

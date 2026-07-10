@@ -79,6 +79,10 @@ async fn event_loop(
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Every loop exit — clean quit or a dying event stream — funnels through this instead of an
+    // early `return`, so the post-loop highlight cleanup below always runs first (spec 006: quit
+    // always resets).
+    let mut outcome: AppResult<()> = Ok(());
 
     loop {
         terminal.draw(|f| view::render(f, &app))?;
@@ -91,8 +95,12 @@ async fn event_loop(
                     }
                 }
                 Some(Ok(_)) => {} // resize etc. — next draw picks it up
-                // A dying event stream (tty EIO) must not look like a clean `q` — exit nonzero.
-                Some(Err(e)) => return Err(e.into()),
+                // A dying event stream (tty EIO) must not look like a clean `q` — exit nonzero,
+                // but only after the cleanup below runs like every other quit path.
+                Some(Err(e)) => {
+                    outcome = Err(e.into());
+                    break;
+                }
                 None => break,
             },
             Some(msg) = rx.recv() => app.update(msg),
@@ -128,7 +136,7 @@ async fn event_loop(
     if highlight_enabled {
         highlight::reset_all(app.tinted_pts()).await;
     }
-    Ok(())
+    outcome
 }
 
 /// Run one full sensor sweep off the UI task; the result arrives as a `Msg` carrying `seq`.

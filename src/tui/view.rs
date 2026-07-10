@@ -25,7 +25,7 @@ use ratatui::Frame;
 
 use crate::board::{dir_name, format_age, SessionRow};
 use crate::fold::Status;
-use crate::telemetry::{ctx_used_pct, format_tokens};
+use crate::telemetry::format_tokens;
 
 use super::model::App;
 
@@ -60,34 +60,11 @@ fn status_style(status: Status) -> (&'static str, Style) {
     }
 }
 
-/// Stable account color: same name → same color, 6-slot palette (6 accounts on this box).
-/// djb2 with seed 18 + a splitmix64 finalizer — the seed is chosen so the six current
-/// accounts (echo-acct/gmail/acme/post/golf-acct/projectz) land on six DISTINCT slots (spec 004);
-/// a future account still gets a stable color, possibly colliding (acceptable for a visual aid).
-fn account_color(account: &str) -> Color {
-    const PALETTE: [Color; 6] = [
-        Color::Cyan,
-        Color::LightMagenta,
-        Color::LightBlue,
-        Color::LightGreen,
-        Color::LightYellow,
-        Color::LightRed,
-    ];
-    let mut x: u64 = account
-        .bytes()
-        .map(u64::from)
-        .fold(18, |h, b| h.wrapping_mul(33) ^ b);
-    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    x ^= x >> 31;
-    PALETTE[usize::try_from(x % 6).unwrap_or(0)]
-}
-
-/// djb2 fold + splitmix64 finalizer — the same recipe as `account_color`, parameterized by a
-/// seed so the emoji pick and the color pick hash independently (spec 007: they must not
-/// correlate).
-fn dir_hash(dir: &str, seed: u64) -> u64 {
-    let mut x: u64 = dir
+/// djb2 fold (from `seed`) + a splitmix64 finalizer — the one seeded hash behind both
+/// `account_color` and `dir_badge` (spec 004/007): each caller picks its own seed(s) so
+/// unrelated hash slots (account color, dir emoji, dir color) never correlate.
+fn seeded_hash(s: &str, seed: u64) -> u64 {
+    let mut x: u64 = s
         .bytes()
         .map(u64::from)
         .fold(seed, |h, b| h.wrapping_mul(33) ^ b);
@@ -95,6 +72,25 @@ fn dir_hash(dir: &str, seed: u64) -> u64 {
     x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     x ^= x >> 31;
     x
+}
+
+/// 6-color palette shared by the account and dir badges (6 accounts on this box, spec 004).
+const PALETTE: [Color; 6] = [
+    Color::Cyan,
+    Color::LightMagenta,
+    Color::LightBlue,
+    Color::LightGreen,
+    Color::LightYellow,
+    Color::LightRed,
+];
+
+/// Stable account color: same name → same color, 6-slot palette (6 accounts on this box).
+/// Seed 18 is chosen so the six current accounts (echo-acct/gmail/acme/post/golf-acct/projectz)
+/// land on six DISTINCT slots (spec 004); a future account still gets a stable color, possibly
+/// colliding (acceptable for a visual aid).
+fn account_color(account: &str) -> Color {
+    const SEED: u64 = 18;
+    PALETTE[usize::try_from(seeded_hash(account, SEED) % 6).unwrap_or(0)]
 }
 
 /// Stable dir badge: same dir name -> same emoji + color always (pure hash, like
@@ -107,18 +103,10 @@ fn dir_badge(dir: &str) -> (char, Color) {
     const EMOJI: [char; 12] = [
         '🦀', '🧠', '🚀', '📦', '🌊', '🔥', '🐙', '🎯', '🌿', '💎', '⚡', '🍋',
     ];
-    const PALETTE: [Color; 6] = [
-        Color::Cyan,
-        Color::LightMagenta,
-        Color::LightBlue,
-        Color::LightGreen,
-        Color::LightYellow,
-        Color::LightRed,
-    ];
     const EMOJI_SEED: u64 = 9;
     const COLOR_SEED: u64 = 5;
-    let emoji = EMOJI[usize::try_from(dir_hash(dir, EMOJI_SEED) % 12).unwrap_or(0)];
-    let color = PALETTE[usize::try_from(dir_hash(dir, COLOR_SEED) % 6).unwrap_or(0)];
+    let emoji = EMOJI[usize::try_from(seeded_hash(dir, EMOJI_SEED) % 12).unwrap_or(0)];
+    let color = PALETTE[usize::try_from(seeded_hash(dir, COLOR_SEED) % 6).unwrap_or(0)];
     (emoji, color)
 }
 
@@ -190,14 +178,10 @@ fn render_table(f: &mut Frame<'_>, area: Rect, app: &App) {
         let dir = dir_name(&r.cwd);
         let (dir_emoji, dir_color) = dir_badge(dir);
         // ctx% seam (spec 008): `ctx_pct` is the source of truth (Claude and Codex windows
-        // differ, so the bar must never re-derive Codex tokens through Claude's 200k/1M
-        // inference) — falling back to `ctx_used_pct(context_tokens)` only covers a row built
-        // without going through `board::assemble` (which always sets `ctx_pct` when tokens
-        // are known).
-        let pct = r
-            .ctx_pct
-            .map(u64::from)
-            .or_else(|| r.context_tokens.map(ctx_used_pct));
+        // differ — Claude's 200k/1M inference must never be applied to Codex tokens). A bare
+        // `None` renders "—"; `board::assemble` always sets `ctx_pct` for Claude rows once
+        // tokens are known, so this never regresses the Claude lane.
+        let pct = r.ctx_pct.map(u64::from);
         let ctx_cell = pct.map_or_else(
             || Cell::from("—"),
             |pct| Cell::from(ctx_bar(pct)).style(ctx_style(pct)),
@@ -230,7 +214,10 @@ fn render_table(f: &mut Frame<'_>, area: Rect, app: &App) {
         rows,
         [
             Constraint::Length(10),
-            Constraint::Max(18),
+            // Fixed, not Max: on a narrow window ratatui squeezes flexible columns first and
+            // the badge column collapsed entirely (live-verified at 80 cols — DIR lost to
+            // SESSION's Min). 14 = emoji(2) + space + 11 chars ("tokenomics" fits).
+            Constraint::Length(14),
             Constraint::Min(24),
             Constraint::Length(10),
             Constraint::Length(5),
@@ -293,9 +280,16 @@ fn render_footer(f: &mut Frame<'_>, area: Rect, app: &App) {
 mod tests {
     use super::*;
     use crate::discovery::ScanStats;
+    use crate::telemetry::ctx_used_pct;
     use crate::tui::model::{Msg, Snapshot};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+
+    /// Same clamp recipe as `board::assemble` — the fixture must carry `ctx_pct` exactly like a
+    /// real Claude row would, now that the view no longer falls back to `context_tokens`.
+    fn ctx_pct_for(tokens: u64) -> u8 {
+        u8::try_from(ctx_used_pct(tokens).min(u64::from(u8::MAX))).unwrap_or(u8::MAX)
+    }
 
     fn row(id: &str, status: Status, name: &str, tokens: Option<u64>) -> SessionRow {
         SessionRow {
@@ -305,7 +299,7 @@ mod tests {
             status,
             cwd: "/tui/fleetops".to_string(),
             context_tokens: tokens,
-            ctx_pct: None,
+            ctx_pct: tokens.map(ctx_pct_for),
             secs_since_append: Some(75),
             pane: Some(crate::board::MatchedPane {
                 socket: String::new(),
