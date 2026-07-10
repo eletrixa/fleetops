@@ -28,6 +28,18 @@
 4. **Statusline input JSON** (official docs 2026-07-09) now includes `context_window.used_percentage`,
    `rate_limits`, `session_name` — richer than assumed; local `statusline.mjs` still self-computes.
 
+## Corrections from implementation (2026-07-10, waves 2–4)
+
+5. **Native status has a 4th value: `"waiting"`** (seen live, session 166350, v2.1.206) — an
+   input-blocked state the transcript never shows. **Disproves dossier assumption A6** ("busy
+   doesn't distinguish permission-wait"): discovery found it via `fleet doctor`'s unknown-status
+   drift report on first live run. Fold maps it to an attention state (`Waiting`).
+6. **Pane `cwd` is useless for WSL sessions**: `wezterm cli list` reports `file:///C:/Users/user/`
+   for almost every WSL pane (OSC7 cwd doesn't cross the boundary; only this repo's pane showed
+   `file://wsl.localhost/...`). Pane↔session matching is **title-first** (pane title == ai-title
+   or native name), cwd as fallback. 12/19 sessions matched at first live run; unmatched ones sit
+   in panes whose titles show neither (e.g. generic "Claude Code").
+
 ## Scale facts
 
 3,866 transcript JSONLs total; ~42 modified/24 h; ~17 concurrent sessions typical; sizes p50 214 KB,

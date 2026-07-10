@@ -1,17 +1,18 @@
-//! Pure render: the board table + footer, a function of `&App` only.
+//! Pure render: the session board + footer, a function of `&App` only.
 //!
 //! Project: Fleetops — TUI monitoring all running Claude Code sessions (the fleet)
 //! Module:  src/tui/view.rs
-//! Deps:    ratatui
+//! Deps:    ratatui; board, fold, telemetry (formatting helpers)
 //! Tested:  inline `#[cfg(test)]` TestBackend render assertions
 //!
 //! Key responsibilities:
-//! - Lay out the pane board: status | name | cwd | tab/pane, with the selected row highlighted.
-//! - Footer: pane count, refresh age, key hints, last error.
+//! - Board table: status | session | account | ctx% | tokens | age | cwd | pane.
+//! - Stable per-account color (hash into a 6-color palette); status color from one pure map.
+//! - Footer: session count, needs-answer count, refresh age, key hints, last error.
 //!
 //! Design constraints:
 //! - Pure and read-only over `App`: no I/O, no `.await`, no state mutation (ratatui rule).
-//! - Colour is a pure function of status (one `status → Style` map).
+//! - Colour is a pure function of state; never log tokens/secrets (only counts are rendered).
 
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -19,7 +20,9 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use ratatui::Frame;
 
-use crate::panes::PaneStatus;
+use crate::board::{format_age, SessionRow};
+use crate::fold::Status;
+use crate::telemetry::{ctx_used_pct, format_tokens};
 
 use super::model::App;
 
@@ -31,25 +34,89 @@ pub fn render(f: &mut Frame<'_>, app: &App) {
     render_footer(f, footer, app);
 }
 
-fn status_style(status: PaneStatus) -> (&'static str, Style) {
+/// One pure `status → (label, style)` map — consistent and testable.
+fn status_style(status: Status) -> (&'static str, Style) {
     match status {
-        PaneStatus::Working => ("⠿ working", Style::default().fg(Color::Green)),
-        PaneStatus::Idle => ("✳ idle", Style::default().fg(Color::Yellow)),
+        Status::NeedsAnswer => (
+            "? answer",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Status::Waiting => (
+            "⏳ waiting",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Status::Stalled => ("~ stalled?", Style::default().fg(Color::Red)),
+        Status::Unknown => ("! unknown", Style::default().fg(Color::Red)),
+        Status::Working => ("⠿ working", Style::default().fg(Color::Green)),
+        Status::Idle => ("✳ idle", Style::default().fg(Color::Yellow)),
+        Status::Shell => ("$ shell", Style::default().fg(Color::DarkGray)),
+    }
+}
+
+/// Stable account color: same name → same color, 6-slot palette (6 accounts on this box).
+/// djb2 with seed 18 + a splitmix64 finalizer — the seed is chosen so the six current
+/// accounts (echo-acct/gmail/acme/post/golf-acct/projectz) land on six DISTINCT slots (spec 004);
+/// a future account still gets a stable color, possibly colliding (acceptable for a visual aid).
+fn account_color(account: &str) -> Color {
+    const PALETTE: [Color; 6] = [
+        Color::Cyan,
+        Color::LightMagenta,
+        Color::LightBlue,
+        Color::LightGreen,
+        Color::LightYellow,
+        Color::LightRed,
+    ];
+    let mut x: u64 = account
+        .bytes()
+        .map(u64::from)
+        .fold(18, |h, b| h.wrapping_mul(33) ^ b);
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^= x >> 31;
+    PALETTE[usize::try_from(x % 6).unwrap_or(0)]
+}
+
+fn pane_cell(row: &SessionRow) -> String {
+    match (row.pane, row.pane_ambiguous) {
+        (Some((tab, pane)), _) => format!("{tab}:{pane}"),
+        (None, true) => "≈?".to_string(),
+        (None, false) => "—".to_string(),
     }
 }
 
 fn render_table(f: &mut Frame<'_>, area: Rect, app: &App) {
-    let header = Row::new(["STATUS", "SESSION", "CWD", "TAB:PANE"])
-        .style(Style::default().add_modifier(Modifier::BOLD));
+    let header = Row::new([
+        "STATUS", "SESSION", "ACCT", "CTX%", "TOK", "AGE", "CWD", "PANE",
+    ])
+    .style(Style::default().add_modifier(Modifier::BOLD));
     let selected = app.selected_index();
     let rows = app.rows.iter().enumerate().map(|(i, r)| {
         let (label, style) = status_style(r.status);
-        let marker = if r.is_active { "● " } else { "" };
+        let account = r.account.clone().unwrap_or_default();
+        let account_style = if account.is_empty() {
+            Style::default()
+        } else {
+            Style::default().fg(account_color(&account))
+        };
+        let (ctx, tok) = r
+            .context_tokens
+            .map_or(("—".to_string(), "—".to_string()), |t| {
+                (format!("{}%", ctx_used_pct(t)), format_tokens(t))
+            });
+        let age = r.secs_since_append.map_or("—".to_string(), format_age);
         let row = Row::new([
             Cell::from(label).style(style),
-            Cell::from(format!("{marker}{}", r.name)),
+            Cell::from(r.name.clone()),
+            Cell::from(account).style(account_style),
+            Cell::from(ctx),
+            Cell::from(tok),
+            Cell::from(age),
             Cell::from(r.cwd.clone()),
-            Cell::from(format!("{}:{}", r.tab_id, r.pane_id)),
+            Cell::from(pane_cell(r)),
         ]);
         if selected == Some(i) {
             row.style(Style::default().add_modifier(Modifier::REVERSED))
@@ -61,24 +128,44 @@ fn render_table(f: &mut Frame<'_>, area: Rect, app: &App) {
         rows,
         [
             Constraint::Length(10),
-            Constraint::Min(20),
-            Constraint::Max(30),
-            Constraint::Length(8),
+            Constraint::Min(24),
+            Constraint::Length(6),
+            Constraint::Length(4),
+            Constraint::Length(5),
+            Constraint::Length(4),
+            Constraint::Max(28),
+            Constraint::Length(7),
         ],
     )
     .header(header)
-    .block(Block::default().borders(Borders::ALL).title(" fleet "));
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" fleet — {} sessions ", app.rows.len())),
+    );
     f.render_widget(table, area);
 }
 
 fn render_footer(f: &mut Frame<'_>, area: Rect, app: &App) {
-    let text = match &app.error {
-        Some(e) => format!("! {e}"),
-        None => format!(
-            "{} panes · refreshed {}s ago · j/k move · Enter jump · r refresh · q quit",
-            app.rows.len(),
-            app.refresh_age_secs
-        ),
+    let needs = app
+        .rows
+        .iter()
+        .filter(|r| r.status == Status::NeedsAnswer)
+        .count();
+    let dir_warn = if app.stats.dir_unreadable {
+        "⚠ sessions dir unreadable · "
+    } else {
+        ""
+    };
+    let stats = format!(
+        "{dir_warn}{} live · {} need answer · {} stale files · refreshed {}s ago",
+        app.stats.live, needs, app.stats.stale_dead, app.refresh_age_secs
+    );
+    // Spec 004: stats PLUS the error — an error must not hide the freshness/counts.
+    let text = if let Some(e) = &app.error {
+        format!("{stats} · ! {e}")
+    } else {
+        format!("{stats} · j/k move · Enter jump · r refresh · q quit")
     };
     let style = if app.error.is_some() {
         Style::default().fg(Color::Red)
@@ -91,24 +178,27 @@ fn render_footer(f: &mut Frame<'_>, area: Rect, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::panes::PaneRow;
-    use crate::tui::model::Msg;
+    use crate::discovery::ScanStats;
+    use crate::tui::model::{Msg, Snapshot};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    fn row(pane_id: u64, status: PaneStatus, name: &str, active: bool) -> PaneRow {
-        PaneRow {
-            pane_id,
-            tab_id: 3,
-            status,
+    fn row(id: &str, status: Status, name: &str, tokens: Option<u64>) -> SessionRow {
+        SessionRow {
+            session_id: id.to_string(),
             name: name.to_string(),
+            account: Some("golf-acct".to_string()),
+            status,
             cwd: "/tui/fleetops".to_string(),
-            is_active: active,
+            context_tokens: tokens,
+            secs_since_append: Some(75),
+            pane: Some((3, 47)),
+            pane_ambiguous: false,
         }
     }
 
     fn rendered(app: &App) -> String {
-        let backend = TestBackend::new(90, 12);
+        let backend = TestBackend::new(120, 12);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| render(f, app)).unwrap();
         let buffer = terminal.backend().buffer().clone();
@@ -123,40 +213,88 @@ mod tests {
     }
 
     #[test]
-    fn board_renders_rows_and_footer() {
+    fn board_renders_all_columns_and_footer() {
         let mut app = App::default();
-        app.update(Msg::Panes(vec![
-            row(
-                47,
-                PaneStatus::Working,
-                "Resume FleetOps conversation",
-                false,
-            ),
-            row(51, PaneStatus::Idle, "Review skills", true),
-        ]));
+        app.update(Msg::Snapshot(Box::new(Snapshot {
+            rows: vec![
+                row("a", Status::NeedsAnswer, "Pick an option", Some(120_000)),
+                row(
+                    "b",
+                    Status::Working,
+                    "Resume FleetOps conversation",
+                    Some(117_585),
+                ),
+            ],
+            stats: ScanStats {
+                total_files: 30,
+                parse_failed: 0,
+                stale_dead: 12,
+                live: 2,
+                ..ScanStats::default()
+            },
+            ..Snapshot::default()
+        })));
         let screen = rendered(&app);
-        assert!(screen.contains("Resume FleetOps conversation"));
+        assert!(screen.contains("? answer"));
         assert!(screen.contains("⠿ working"));
-        assert!(screen.contains("✳ idle"));
-        assert!(screen.contains("● Review skills"), "active pane marker");
+        assert!(screen.contains("Pick an option"));
+        assert!(screen.contains("golf-acct"));
+        assert!(screen.contains("60%"), "120k of 200k window");
+        assert!(screen.contains("117k"));
+        assert!(screen.contains("1m"), "75s age humanized");
         assert!(screen.contains("3:47"));
-        assert!(screen.contains("2 panes"));
-        assert!(screen.contains("Enter jump"));
+        assert!(screen.contains("fleet — 2 sessions"));
+        assert!(screen.contains("2 live · 1 need answer · 12 stale files"));
     }
 
     #[test]
-    fn footer_shows_error_instead_of_hints() {
+    fn missing_telemetry_renders_dashes() {
+        let mut app = App::default();
+        let mut r = row("a", Status::Working, "young session", None);
+        r.secs_since_append = None;
+        r.pane = None;
+        app.update(Msg::Snapshot(Box::new(Snapshot {
+            rows: vec![r],
+            ..Snapshot::default()
+        })));
+        let screen = rendered(&app);
+        assert!(screen.contains("—"));
+    }
+
+    #[test]
+    fn footer_shows_error_alongside_stats_not_instead() {
         let mut app = App::default();
         app.update(Msg::Error("wezterm.exe: timed out after 5s".into()));
         let screen = rendered(&app);
         assert!(screen.contains("! wezterm.exe: timed out after 5s"));
-        assert!(!screen.contains("Enter jump"));
+        assert!(
+            screen.contains("0 live"),
+            "stats stay visible during an error"
+        );
+        assert!(
+            !screen.contains("Enter jump"),
+            "hints yield the space to the error"
+        );
+    }
+
+    #[test]
+    fn account_color_is_stable_and_distinct_for_known_accounts() {
+        let a = account_color("golf-acct");
+        assert_eq!(a, account_color("golf-acct"), "stable");
+        // The six real accounts on this box (~/.claude-acct) — spec 004: all distinct.
+        // (The hash seed is tuned to this set; re-tune if an account is renamed.)
+        let accounts = ["echo-acct", "gmail", "acme", "post", "golf-acct", "projectz"];
+        let distinct: std::collections::HashSet<_> = accounts
+            .iter()
+            .map(|a| format!("{:?}", account_color(a)))
+            .collect();
+        assert_eq!(distinct.len(), 6, "all six accounts distinct: {distinct:?}");
     }
 
     #[test]
     fn empty_board_renders_without_panicking() {
         let app = App::default();
         let screen = rendered(&app);
-        assert!(screen.contains("0 panes"));
+        assert!(screen.contains("fleet — 0 sessions"));
     }
 }

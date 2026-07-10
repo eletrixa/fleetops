@@ -10,9 +10,13 @@ tokenomics is per-**account**.
 
 ## Status
 
-**Wave 1 shipped** (spec 001 — wezterm lens: pane board + jump). Architecture: Option A "sensor
-fusion" per the dossier in `plans/001-*`; waves 2–4 add sessions/ + JSONL + /proc sensors and the
-status fold. Verified data sources: `docs/RESEARCH.md`.
+**Waves 1–4 shipped** (specs 001–004) — full Option A "sensor fusion" per the dossier in
+`plans/001-*`: session discovery (`~/.claude/sessions/*.json` + /proc liveness + account
+attribution), transcript-tail telemetry (ctx%/tokens/ai-title/pending question), pure status
+fold (NeedsAnswer / Waiting / Stalled? / Unknown / Working / Idle / Shell), title-first pane
+matching + jump, `fleet doctor` drift report. Verified data sources + implementation
+corrections: `docs/RESEARCH.md`. Next (trigger-gated, see dossier): hook lane, SQLite history,
+WSLENV pane forwarding.
 
 ## Tech Stack
 
@@ -27,6 +31,7 @@ status fold. Verified data sources: `docs/RESEARCH.md`.
 ```bash
 ./check.sh              # THE GATE: fmt --check + clippy -D warnings + test (must be green)
 cargo run               # launch the board
+cargo run -- doctor     # read-only drift report (sessions/transcripts/panes/wezterm)
 cargo build --release   # -> target/release/fleet
 ```
 
