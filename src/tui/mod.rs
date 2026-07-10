@@ -13,7 +13,8 @@
 //!
 //! Design constraints:
 //! - Async work never runs on the UI task — sweeps and jumps are spawned; the loop only `select!`s.
-//! - Read-only over the fleet; the only mutating verbs are `activate-tab`/`-pane` (focus).
+//! - Read-only over the fleet; the only mutating verbs are `activate-tab`/`-pane` (focus) and
+//!   the OSC 11/111 pane-tint writes (spec 006).
 
 pub mod keys;
 pub mod model;
@@ -30,7 +31,7 @@ use crate::error::AppResult;
 use crate::panes::PaneCache;
 use crate::runner::{Exec, Runner};
 use crate::telemetry::TailCache;
-use crate::{board, discovery, panes, paths};
+use crate::{board, discovery, highlight, panes, paths};
 
 use model::{App, Msg, Snapshot};
 
@@ -46,10 +47,11 @@ const POLL: Duration = Duration::from_secs(2);
 /// Footer age / redraw tick.
 const TICK: Duration = Duration::from_secs(1);
 
-/// Run the board until the user quits.
-pub async fn run() -> AppResult<()> {
+/// Run the board until the user quits. `highlight_enabled` gates the OSC pane-tint writes
+/// (`fleet --no-highlight`) — the model still computes them, the loop just drops them.
+pub async fn run(highlight_enabled: bool) -> AppResult<()> {
     let mut terminal = ratatui::try_init()?;
-    let result = event_loop(&mut terminal).await;
+    let result = event_loop(&mut terminal, highlight_enabled).await;
     if let Err(e) = ratatui::try_restore() {
         // A swallowed restore failure leaves a garbled raw-mode terminal with zero explanation.
         eprintln!("fleet: terminal restore failed: {e} — run `reset`");
@@ -57,7 +59,10 @@ pub async fn run() -> AppResult<()> {
     result
 }
 
-async fn event_loop(terminal: &mut ratatui::DefaultTerminal) -> AppResult<()> {
+async fn event_loop(
+    terminal: &mut ratatui::DefaultTerminal,
+    highlight_enabled: bool,
+) -> AppResult<()> {
     let runner: Arc<dyn Runner> = Arc::new(Exec);
     let cache = Arc::new(Mutex::new(SweepCaches::default()));
     let (tx, mut rx) = mpsc::channel::<Msg>(16);
@@ -108,9 +113,18 @@ async fn event_loop(terminal: &mut ratatui::DefaultTerminal) -> AppResult<()> {
         if let Some(target) = app.pending_jump.take() {
             spawn_jump(&runner, &tx, target);
         }
+        if !app.pending_highlights.is_empty() {
+            let cmds = std::mem::take(&mut app.pending_highlights);
+            if highlight_enabled {
+                highlight::spawn_apply(cmds);
+            }
+        }
         if app.should_quit {
             break;
         }
+    }
+    if highlight_enabled {
+        highlight::reset_all(app.tinted_pts()).await;
     }
     Ok(())
 }

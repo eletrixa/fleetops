@@ -3,7 +3,8 @@
 //! Project: Fleetops — TUI monitoring all running Claude Code sessions (the fleet)
 //! Module:  src/board.rs
 //! Deps:    discovery, telemetry, fold, panes (types only)
-//! Tested:  inline `#[cfg(test)]` — pane match table, assembly ordering, name preference
+//! Tested:  inline `#[cfg(test)]` — pane match table, assembly ordering, name preference,
+//!          pts flowing to the row only when a pane matched
 //!
 //! Key responsibilities:
 //! - `match_pane`: session (cwd, name) → wezterm pane, tie-broken by title, ambiguity surfaced.
@@ -40,6 +41,9 @@ pub struct SessionRow {
     pub pane: Option<MatchedPane>,
     /// More than one pane matched and the title tie-break failed.
     pub pane_ambiguous: bool,
+    /// The session's pts, carried through only when `wezterm_pane` is present — the
+    /// highlight write-target guard lives here, not in the writer (wave 6, spec 006).
+    pub pts: Option<String>,
 }
 
 /// The pane a session resolved to: instance + ids for the jump, tab position for the board.
@@ -144,6 +148,13 @@ pub fn assemble(
                 secs_since_append: tel.secs_since_append,
                 pane,
                 pane_ambiguous,
+                // The highlight write-target guard: a session is only ever highlightable when
+                // it renders in a wezterm pane (spec 006).
+                pts: if session.wezterm_pane.is_some() {
+                    session.pts.clone()
+                } else {
+                    None
+                },
             }
         })
         .collect();
@@ -213,6 +224,7 @@ mod tests {
             },
             account: Some("golf-acct".to_string()),
             wezterm_pane: None,
+            pts: None,
         }
     }
 
@@ -379,5 +391,38 @@ mod tests {
         for (secs, want) in cases {
             assert_eq!(format_age(secs), want, "secs={secs}");
         }
+    }
+
+    #[test]
+    fn pts_flows_to_the_row_only_when_wezterm_pane_is_present() {
+        let with_pane = LiveSession {
+            wezterm_pane: Some(4),
+            pts: Some("/dev/pts/2".to_string()),
+            ..session("s1", "/a", "one", NativeStatus::Busy)
+        };
+        let without_pane = LiveSession {
+            wezterm_pane: None,
+            pts: Some("/dev/pts/2".to_string()),
+            ..session("s2", "/b", "two", NativeStatus::Busy)
+        };
+        let tel = [Telemetry::default(), Telemetry::default()];
+        let rows = assemble(&[with_pane, without_pane], &tel, &[]);
+        let pts_of = |id: &str| {
+            rows.iter()
+                .find(|r| r.session_id == id)
+                .unwrap()
+                .pts
+                .clone()
+        };
+        assert_eq!(
+            pts_of("s1"),
+            Some("/dev/pts/2".to_string()),
+            "wezterm_pane present -> pts flows through to the row"
+        );
+        assert_eq!(
+            pts_of("s2"),
+            None,
+            "no wezterm_pane -> never highlightable, pts withheld"
+        );
     }
 }

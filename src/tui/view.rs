@@ -258,6 +258,7 @@ mod tests {
                 tab_index: 2,
             }),
             pane_ambiguous: false,
+            pts: None,
         }
     }
 

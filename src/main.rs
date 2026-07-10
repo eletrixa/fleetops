@@ -6,7 +6,8 @@
 //! Tested:  n/a (thin shell; all seams tested in their modules)
 //!
 //! Key responsibilities:
-//! - Dispatch: (default) tui | doctor. Hand-rolled (house style, no clap).
+//! - Dispatch: (default) tui board | `--no-highlight` (board, tints off) | doctor. Hand-rolled
+//!   (house style, no clap).
 //! - Report a fatal error on stderr with exit 1; unknown command exits 2.
 //!
 //! Design constraints:
@@ -17,6 +18,7 @@ mod discovery;
 mod doctor;
 mod error;
 mod fold;
+mod highlight;
 mod panes;
 mod paths;
 mod runner;
@@ -35,13 +37,8 @@ fn main() -> ExitCode {
         }
     };
     match command.as_deref() {
-        None => match runtime.block_on(tui::run()) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("fleet: {e}");
-                ExitCode::FAILURE
-            }
-        },
+        None => run_board(&runtime, true),
+        Some("--no-highlight") => run_board(&runtime, false),
         Some("doctor") => {
             let (report, scan_ok) = runtime.block_on(doctor::run(&runner::Exec));
             println!("{report}");
@@ -52,8 +49,18 @@ fn main() -> ExitCode {
             }
         }
         Some(other) => {
-            eprintln!("fleet: unknown command '{other}' (usage: fleet [doctor])");
+            eprintln!("fleet: unknown command '{other}' (usage: fleet [--no-highlight|doctor])");
             ExitCode::from(2)
+        }
+    }
+}
+
+fn run_board(runtime: &tokio::runtime::Runtime, highlight_enabled: bool) -> ExitCode {
+    match runtime.block_on(tui::run(highlight_enabled)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("fleet: {e}");
+            ExitCode::FAILURE
         }
     }
 }

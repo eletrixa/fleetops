@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- **Wave 6 (spec 006): pane highlighting** — sessions needing attention tint their own wezterm
+  pane background via OSC 11, written straight to the session's `/dev/pts/N` (no `.wezterm.lua`
+  changes): steady amber for NeedsAnswer/Waiting, steady dark red for Stalled. A Working → Idle
+  transition ("just finished") pulses bright/dim green (~1 s) and settles into a sticky dark
+  green that stays until "noticed" (status leaves Idle, or Enter-jump to that row). First-sweep
+  hygiene resets any stale tint left by a crashed/killed previous `fleet`; quit resets every
+  currently-tinted pane (bounded, never hangs exit). Opt out with `fleet --no-highlight` (the
+  model still computes tints, the loop just drops the writes).
+
 - **Strictest-lints pass + 22-finding review sweep** (code-reviewer + code-simplifier plugins,
   4 review dimensions, adversarial verification; all confirmed findings applied TDD-style):
   - Lint gate hardened: clippy `nursery` + `cargo` groups and `missing_docs` now deny; rustdoc

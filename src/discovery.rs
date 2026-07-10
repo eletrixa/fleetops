@@ -10,6 +10,8 @@
 //! - Liveness invariant: session is live iff `/proc/<pid>` exists AND its starttime (stat
 //!   field 22) equals the file's `procStart` string (PID-reuse guard).
 //! - Attribute account from `/proc/<pid>/environ` `CLAUDE_ACCOUNT` (absent → unknown, not error).
+//! - Read the session's pts from `/proc/<pid>/fd/1` (wave 6, spec 006) — kept only when it
+//!   resolves under `/dev/pts/`, the highlight write-target guard.
 //!
 //! Design constraints:
 //! - Read-only over the fleet; never writes into any Claude dir.
@@ -98,6 +100,9 @@ pub struct LiveSession {
     /// `WEZTERM_PANE` from the process environment — exact pane identity (wave 5, needs the
     /// WSLENV forwarding; absent on sessions started before the wezterm restart).
     pub wezterm_pane: Option<u64>,
+    /// The session's own pts, from `read_link(<proc_root>/<pid>/fd/1)` — kept only when the
+    /// target starts with `/dev/pts/` (wave 6, spec 006). The highlight write target.
+    pub pts: Option<String>,
 }
 
 /// Scan tallies for the doctor and footer (files seen vs shown).
@@ -194,10 +199,15 @@ pub fn scan(sessions_dir: &Path, proc_root: &Path) -> (Vec<LiveSession>, ScanSta
             .ok()
             .map(|b| parse_environ(&b))
             .unwrap_or_default();
+        let pts = std::fs::read_link(proc_root.join(file.pid.to_string()).join("fd").join("1"))
+            .ok()
+            .and_then(|target| target.to_str().map(str::to_string))
+            .filter(|target| target.starts_with("/dev/pts/"));
         live.push(LiveSession {
             file,
             account: environ.account,
             wezterm_pane: environ.wezterm_pane,
+            pts,
         });
     }
     stats.live = live.len();
@@ -354,5 +364,37 @@ mod tests {
         assert!(live.is_empty());
         assert!(stats.dir_unreadable);
         assert_eq!(stats.total_files, 0);
+    }
+
+    #[test]
+    fn scan_reads_pts_from_fd_1_symlink_dev_pts_only() {
+        let tmp = std::env::temp_dir().join(format!("fleet-pts-{}", std::process::id()));
+        let sessions = tmp.join("sessions");
+        let proc_root = tmp.join("proc");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::create_dir_all(&proc_root).unwrap();
+
+        std::fs::write(sessions.join("1.json"), session_json(1, "100", "busy")).unwrap();
+        fake_proc(&proc_root, 1, "100", None);
+        let fd1 = proc_root.join("1").join("fd");
+        std::fs::create_dir_all(&fd1).unwrap();
+        std::os::unix::fs::symlink("/dev/pts/7", fd1.join("1")).unwrap();
+
+        std::fs::write(sessions.join("2.json"), session_json(2, "200", "busy")).unwrap();
+        fake_proc(&proc_root, 2, "200", None);
+        let fd2 = proc_root.join("2").join("fd");
+        std::fs::create_dir_all(&fd2).unwrap();
+        std::os::unix::fs::symlink("/dev/null", fd2.join("1")).unwrap();
+
+        let (live, _stats) = scan(&sessions, &proc_root);
+        std::fs::remove_dir_all(&tmp).ok();
+
+        let pts_of = |pid: u32| live.iter().find(|s| s.file.pid == pid).unwrap().pts.clone();
+        assert_eq!(
+            pts_of(1),
+            Some("/dev/pts/7".to_string()),
+            "fd/1 -> a real pts is kept"
+        );
+        assert_eq!(pts_of(2), None, "fd/1 -> /dev/null is filtered out");
     }
 }
