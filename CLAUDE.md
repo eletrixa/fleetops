@@ -48,7 +48,8 @@ ambiguities `[NEEDS CLARIFICATION]`; never guess.
 
 ## Git
 
-- **Default branch: `dev`.** Never push directly to `main`.
+- **Default branch: `main` — develop directly on `main`** (early-project decision, 2026-07-10).
+  Introduce a `dev` branch only when the maintainer says so.
 
 ## Boundaries
 
