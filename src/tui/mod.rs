@@ -91,8 +91,8 @@ async fn event_loop(terminal: &mut ratatui::DefaultTerminal) -> AppResult<()> {
             sweep_seq += 1;
             spawn_sweep(&runner, &cache, &tx, sweep_seq);
         }
-        if let Some(pane_id) = app.pending_jump.take() {
-            spawn_jump(&runner, &tx, pane_id);
+        if let Some((tab_id, pane_id)) = app.pending_jump.take() {
+            spawn_jump(&runner, &tx, tab_id, pane_id);
         }
         if app.should_quit {
             break;
@@ -173,11 +173,17 @@ fn scan_fleet(
 }
 
 /// Fire the jump off the UI task; only failures surface (as a footer `Msg::Error`).
-fn spawn_jump(runner: &Arc<dyn Runner>, tx: &mpsc::Sender<Msg>, pane_id: u64) {
+/// Tab first, then pane: activate-pane alone focuses within a tab but doesn't switch tabs.
+fn spawn_jump(runner: &Arc<dyn Runner>, tx: &mpsc::Sender<Msg>, tab_id: u64, pane_id: u64) {
     let runner = Arc::clone(runner);
     let tx = tx.clone();
     tokio::spawn(async move {
-        if let Err(e) = runner.run(&panes::activate_pane_spec(pane_id)).await {
+        let result = async {
+            runner.run(&panes::activate_tab_spec(tab_id)).await?;
+            runner.run(&panes::activate_pane_spec(pane_id)).await
+        }
+        .await;
+        if let Err(e) = result {
             let _ = tx.send(Msg::Error(format!("jump: {e}"))).await;
         }
     });

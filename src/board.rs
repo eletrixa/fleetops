@@ -36,10 +36,31 @@ pub struct SessionRow {
     pub context_tokens: Option<u64>,
     /// Seconds since the transcript last grew.
     pub secs_since_append: Option<u64>,
-    /// Matched wezterm pane `(tab_id, pane_id)` — the jump target.
-    pub pane: Option<(u64, u64)>,
+    /// Matched wezterm pane — the jump target.
+    pub pane: Option<MatchedPane>,
     /// More than one pane matched and the title tie-break failed.
     pub pane_ambiguous: bool,
+}
+
+/// The pane a session resolved to: ids for the jump, tab position for the board.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MatchedPane {
+    /// wezterm tab id (jump: activate-tab).
+    pub tab_id: u64,
+    /// wezterm pane id (jump: activate-pane).
+    pub pane_id: u64,
+    /// 1-based tab-bar position — what the maintainer sees on the tab bar.
+    pub tab_index: u64,
+}
+
+impl MatchedPane {
+    fn from_pane(p: &PaneRow) -> Self {
+        Self {
+            tab_id: p.tab_id,
+            pane_id: p.pane_id,
+            tab_index: p.tab_index,
+        }
+    }
 }
 
 /// Match a session to a wezterm pane. Priority (spec 005):
@@ -52,10 +73,10 @@ pub fn match_pane(
     cwd: &str,
     names: &[&str],
     panes: &[PaneRow],
-) -> (Option<(u64, u64)>, bool) {
+) -> (Option<MatchedPane>, bool) {
     if let Some(id) = env_pane {
         if let Some(p) = panes.iter().find(|p| p.pane_id == id) {
-            return (Some((p.tab_id, p.pane_id)), false); // exact identity, never ambiguous
+            return (Some(MatchedPane::from_pane(p)), false); // exact identity, never ambiguous
         }
         // env pane gone from the list (pane closed / other window) — fall through.
     }
@@ -64,14 +85,14 @@ pub fn match_pane(
         .filter(|p| names.iter().any(|n| !n.is_empty() && p.name == *n))
         .collect();
     match by_title.as_slice() {
-        [only] => return (Some((only.tab_id, only.pane_id)), false),
+        [only] => return (Some(MatchedPane::from_pane(only)), false),
         [_, ..] => return (None, true),
         [] => {}
     }
     let by_cwd: Vec<&PaneRow> = panes.iter().filter(|p| p.cwd == cwd).collect();
     match by_cwd.as_slice() {
         [] => (None, false),
-        [only] => (Some((only.tab_id, only.pane_id)), false),
+        [only] => (Some(MatchedPane::from_pane(only)), false),
         [_, ..] => (None, true),
     }
 }
@@ -125,6 +146,11 @@ pub fn assemble(
     rows
 }
 
+/// Last path segment for display: `/home/user/work/brain` → `brain`; `/` → `/`.
+pub fn dir_name(cwd: &str) -> &str {
+    cwd.rsplit('/').find(|s| !s.is_empty()).unwrap_or("/")
+}
+
 /// Humanized age: `7s`, `4m`, `2h`, `3d`.
 pub fn format_age(secs: u64) -> String {
     match secs {
@@ -146,10 +172,19 @@ mod tests {
         PaneRow {
             pane_id,
             tab_id: 1,
+            tab_index: 1,
             status: PaneStatus::Working,
             name: name.to_string(),
             cwd: cwd.to_string(),
             is_active: false,
+        }
+    }
+
+    fn matched(pane_id: u64) -> MatchedPane {
+        MatchedPane {
+            tab_id: 1,
+            pane_id,
+            tab_index: 1,
         }
     }
 
@@ -189,22 +224,22 @@ mod tests {
         // exact env pane beats everything, even a duplicate title situation
         assert_eq!(
             match_pane(Some(4), "/z", &["dupe"], &panes),
-            (Some((1, 4)), false)
+            (Some(matched(4)), false)
         );
         // env pane no longer in the list → falls through to title
         assert_eq!(
             match_pane(Some(99), "/z", &["three"], &panes),
-            (Some((1, 3)), false)
+            (Some(matched(3)), false)
         );
         // title match is primary — cwd wrong (the WSL reality) but title unique
         assert_eq!(
             match_pane(None, "/z", &["three"], &panes),
-            (Some((1, 3)), false)
+            (Some(matched(3)), false)
         );
         // second name (native) matches when the first (ai-title) doesn't
         assert_eq!(
             match_pane(None, "/z", &["no", "two"], &panes),
-            (Some((1, 2)), false)
+            (Some(matched(2)), false)
         );
         // duplicate titles → ambiguous, never guessed
         assert_eq!(match_pane(None, "/z", &["dupe"], &panes), (None, true));
@@ -213,12 +248,26 @@ mod tests {
         // cwd fallback: unique
         assert_eq!(
             match_pane(None, "/a", &["nomatch"], &panes),
-            (Some((1, 1)), false)
+            (Some(matched(1)), false)
         );
         // cwd fallback: ambiguous
         assert_eq!(match_pane(None, "/b", &["nomatch"], &panes), (None, true));
         // nothing matches
         assert_eq!(match_pane(None, "/z", &["x"], &panes), (None, false));
+    }
+
+    #[test]
+    fn dir_name_table() {
+        let cases = [
+            ("/home/user/work/brain", "brain"),
+            ("/tui/fleetops", "fleetops"),
+            ("/tui", "tui"),
+            ("/", "/"),
+            ("", "/"),
+        ];
+        for (cwd, want) in cases {
+            assert_eq!(dir_name(cwd), want, "cwd {cwd:?}");
+        }
     }
 
     #[test]
@@ -244,7 +293,7 @@ mod tests {
         assert_eq!(rows[0].session_id, "s-ask", "NeedsAnswer sorts first");
         assert_eq!(rows[0].status, Status::NeedsAnswer);
         assert_eq!(rows[0].name, "Pick an option", "ai-title wins");
-        assert_eq!(rows[0].pane, Some((1, 7)));
+        assert_eq!(rows[0].pane, Some(matched(7)));
         assert_eq!(rows[0].context_tokens, Some(120_000));
         assert_eq!(rows[1].status, Status::Working);
         assert_eq!(rows[2].status, Status::Idle);

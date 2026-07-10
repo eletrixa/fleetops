@@ -38,6 +38,9 @@ pub struct PaneRow {
     pub pane_id: u64,
     /// wezterm tab id — display grouping.
     pub tab_id: u64,
+    /// 1-based position of this pane's tab within its window (the tab-bar number the maintainer sees;
+    /// derived from list order, counting ALL tabs incl. non-Claude ones).
+    pub tab_index: u64,
     /// Glyph-derived status.
     pub status: PaneStatus,
     /// Title with the glyph prefix stripped — the session's semantic name.
@@ -53,6 +56,8 @@ pub struct PaneRow {
 struct RawPane {
     pane_id: u64,
     tab_id: u64,
+    #[serde(default)]
+    window_id: u64,
     #[serde(default)]
     title: String,
     #[serde(default)]
@@ -79,6 +84,17 @@ pub fn activate_pane_args(pane_id: u64) -> Vec<String> {
     ]
 }
 
+/// argv for `wezterm.exe cli activate-tab --tab-id <id>` — activate-pane alone focuses the
+/// pane within its tab but does NOT bring the tab forward; a jump runs both.
+pub fn activate_tab_args(tab_id: u64) -> Vec<String> {
+    vec![
+        "cli".to_string(),
+        "activate-tab".to_string(),
+        "--tab-id".to_string(),
+        tab_id.to_string(),
+    ]
+}
+
 /// The wezterm binary as reachable from WSL2.
 pub const WEZTERM: &str = "wezterm.exe";
 
@@ -100,6 +116,15 @@ pub fn activate_pane_spec(pane_id: u64) -> CommandSpec {
     }
 }
 
+/// Build the bounded `activate-tab` command.
+pub fn activate_tab_spec(tab_id: u64) -> CommandSpec {
+    CommandSpec {
+        program: WEZTERM.to_string(),
+        args: activate_tab_args(tab_id),
+        timeout: Duration::from_secs(5),
+    }
+}
+
 /// Run `cli list` via `runner` and return the Claude pane rows, sorted by `pane_id`.
 pub async fn list_panes(runner: &dyn Runner) -> AppResult<Vec<PaneRow>> {
     let bytes = runner.run(&list_spec()).await?;
@@ -111,6 +136,21 @@ pub async fn list_panes(runner: &dyn Runner) -> AppResult<Vec<PaneRow>> {
 pub fn parse_pane_list(bytes: &[u8]) -> AppResult<Vec<PaneRow>> {
     let raw: Vec<RawPane> =
         serde_json::from_slice(bytes).map_err(|e| AppError::Parse(format!("wezterm list: {e}")))?;
+    // Tab-bar numbering: wezterm lists panes in window/tab order, so a tab's 1-based position
+    // within its window = order of first appearance. Counted over ALL panes (non-Claude tabs
+    // occupy tab-bar slots too) BEFORE the pane_id sort below destroys that order.
+    let mut tab_positions: std::collections::HashMap<(u64, u64), u64> =
+        std::collections::HashMap::new();
+    let mut per_window: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+    for p in &raw {
+        tab_positions
+            .entry((p.window_id, p.tab_id))
+            .or_insert_with(|| {
+                let counter = per_window.entry(p.window_id).or_insert(0);
+                *counter += 1;
+                *counter
+            });
+    }
     let mut rows: Vec<PaneRow> = raw
         .into_iter()
         .filter_map(|p| {
@@ -118,6 +158,10 @@ pub fn parse_pane_list(bytes: &[u8]) -> AppResult<Vec<PaneRow>> {
             Some(PaneRow {
                 pane_id: p.pane_id,
                 tab_id: p.tab_id,
+                tab_index: tab_positions
+                    .get(&(p.window_id, p.tab_id))
+                    .copied()
+                    .unwrap_or(0),
                 status,
                 name,
                 cwd: short_cwd(&p.cwd),
@@ -184,6 +228,8 @@ mod tests {
             .expect("this session's pane is in the fixture");
         assert_eq!(fleet.status, PaneStatus::Working);
         assert_eq!(fleet.cwd, "/tui/fleetops");
+        // Fixture order: tab 1 first, then tab 3 (this pane) — 2nd slot on the tab bar.
+        assert_eq!(fleet.tab_index, 2);
     }
 
     #[test]
@@ -244,6 +290,10 @@ mod tests {
         assert_eq!(
             activate_pane_args(42),
             ["cli", "activate-pane", "--pane-id", "42"]
+        );
+        assert_eq!(
+            activate_tab_args(7),
+            ["cli", "activate-tab", "--tab-id", "7"]
         );
     }
 

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Board UX: Enter now switches the TAB too (`activate-tab` before `activate-pane` — pane
+  activation alone doesn't bring the tab forward). New TAB column right after STATUS showing
+  the tab-bar position number (tab emoticons aren't readable via the wezterm CLI — they're
+  drawn by the lua tab formatter). CWD column → DIR: last folder only (`brain`, `contoso`).
 - Wave 5 (spec 005): exact pane identity — `WEZTERM_PANE` now crosses into WSL (WSLENV user
   env var set Windows-side; effective for panes opened after a wezterm restart). Match
   priority: exact env pane > title > cwd; doctor reports the exact-identity count. Installed

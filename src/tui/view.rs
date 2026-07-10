@@ -6,7 +6,8 @@
 //! Tested:  inline `#[cfg(test)]` TestBackend render assertions
 //!
 //! Key responsibilities:
-//! - Board table: status | session | account | ctx% | tokens | age | cwd | pane.
+//! - Board table: status | tab (tab-bar position) | session | account | ctx% | tokens | age |
+//!   dir (last cwd folder) | pane.
 //! - Stable per-account color (hash into a 6-color palette); status color from one pure map.
 //! - Footer: session count, needs-answer count, refresh age, key hints, last error.
 //!
@@ -20,7 +21,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use ratatui::Frame;
 
-use crate::board::{format_age, SessionRow};
+use crate::board::{dir_name, format_age, SessionRow};
 use crate::fold::Status;
 use crate::telemetry::{ctx_used_pct, format_tokens};
 
@@ -80,9 +81,18 @@ fn account_color(account: &str) -> Color {
     PALETTE[usize::try_from(x % 6).unwrap_or(0)]
 }
 
+/// TAB cell: the 1-based tab-bar position (what the tab bar shows), `≈?`/`—` when unmatched.
+fn tab_cell(row: &SessionRow) -> String {
+    match (row.pane, row.pane_ambiguous) {
+        (Some(p), _) => p.tab_index.to_string(),
+        (None, true) => "≈?".to_string(),
+        (None, false) => "—".to_string(),
+    }
+}
+
 fn pane_cell(row: &SessionRow) -> String {
     match (row.pane, row.pane_ambiguous) {
-        (Some((tab, pane)), _) => format!("{tab}:{pane}"),
+        (Some(p), _) => p.pane_id.to_string(),
         (None, true) => "≈?".to_string(),
         (None, false) => "—".to_string(),
     }
@@ -90,7 +100,7 @@ fn pane_cell(row: &SessionRow) -> String {
 
 fn render_table(f: &mut Frame<'_>, area: Rect, app: &App) {
     let header = Row::new([
-        "STATUS", "SESSION", "ACCT", "CTX%", "TOK", "AGE", "CWD", "PANE",
+        "STATUS", "TAB", "SESSION", "ACCT", "CTX%", "TOK", "AGE", "DIR", "PANE",
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
     let selected = app.selected_index();
@@ -110,12 +120,13 @@ fn render_table(f: &mut Frame<'_>, area: Rect, app: &App) {
         let age = r.secs_since_append.map_or("—".to_string(), format_age);
         let row = Row::new([
             Cell::from(label).style(style),
+            Cell::from(tab_cell(r)),
             Cell::from(r.name.clone()),
             Cell::from(account).style(account_style),
             Cell::from(ctx),
             Cell::from(tok),
             Cell::from(age),
-            Cell::from(r.cwd.clone()),
+            Cell::from(dir_name(&r.cwd).to_string()),
             Cell::from(pane_cell(r)),
         ]);
         if selected == Some(i) {
@@ -128,13 +139,14 @@ fn render_table(f: &mut Frame<'_>, area: Rect, app: &App) {
         rows,
         [
             Constraint::Length(10),
+            Constraint::Length(3),
             Constraint::Min(24),
             Constraint::Length(6),
             Constraint::Length(4),
             Constraint::Length(5),
             Constraint::Length(4),
-            Constraint::Max(28),
-            Constraint::Length(7),
+            Constraint::Max(16),
+            Constraint::Length(5),
         ],
     )
     .header(header)
@@ -192,7 +204,11 @@ mod tests {
             cwd: "/tui/fleetops".to_string(),
             context_tokens: tokens,
             secs_since_append: Some(75),
-            pane: Some((3, 47)),
+            pane: Some(crate::board::MatchedPane {
+                tab_id: 3,
+                pane_id: 47,
+                tab_index: 2,
+            }),
             pane_ambiguous: false,
         }
     }
@@ -242,7 +258,13 @@ mod tests {
         assert!(screen.contains("60%"), "120k of 200k window");
         assert!(screen.contains("117k"));
         assert!(screen.contains("1m"), "75s age humanized");
-        assert!(screen.contains("3:47"));
+        assert!(screen.contains("TAB"), "tab-bar position column");
+        assert!(screen.contains("47"), "pane id column");
+        assert!(screen.contains("DIR"));
+        assert!(
+            !screen.contains("/tui/fleetops"),
+            "DIR shows the last folder only"
+        );
         assert!(screen.contains("fleet — 2 sessions"));
         assert!(screen.contains("2 live · 1 need answer · 12 stale files"));
     }
