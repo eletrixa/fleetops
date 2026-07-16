@@ -22,7 +22,7 @@ pub const STALL_AFTER_SECS: u64 = 300;
 /// The shown status vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
-    /// A pending AskUserQuestion — the maintainer's answer is blocking the session.
+    /// A pending AskUserQuestion — the user's answer is blocking the session.
     NeedsAnswer,
     /// Native `waiting` — blocked on input the transcript can't show (permission prompt etc.).
     Waiting,
@@ -56,6 +56,22 @@ pub const fn status(
         NativeStatus::Shell => Status::Shell,
         NativeStatus::Waiting => Status::Waiting,
         NativeStatus::Other(_) => Status::Unknown,
+    }
+}
+
+impl Status {
+    /// The exact variant name — the stable string in the `fleet snapshot` JSON contract
+    /// (spec 009). Pinned by a test so a rename can't silently change the external contract.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::NeedsAnswer => "NeedsAnswer",
+            Self::Waiting => "Waiting",
+            Self::Stalled => "Stalled",
+            Self::Unknown => "Unknown",
+            Self::Working => "Working",
+            Self::Idle => "Idle",
+            Self::Shell => "Shell",
+        }
     }
 }
 
@@ -105,6 +121,23 @@ mod tests {
                 *want,
                 "{native:?} pending={pending} age={age:?}"
             );
+        }
+    }
+
+    #[test]
+    fn status_name_is_the_exact_variant_string() {
+        // The `fleet snapshot` JSON contract (spec 009) pins these seven strings.
+        let cases = [
+            (Status::NeedsAnswer, "NeedsAnswer"),
+            (Status::Waiting, "Waiting"),
+            (Status::Stalled, "Stalled"),
+            (Status::Unknown, "Unknown"),
+            (Status::Working, "Working"),
+            (Status::Idle, "Idle"),
+            (Status::Shell, "Shell"),
+        ];
+        for (status, want) in cases {
+            assert_eq!(status.name(), want);
         }
     }
 

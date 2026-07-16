@@ -2,7 +2,7 @@
 
 > **Recommendation: Option A — sensor fusion, single process (with D as its first vertical slice, B as a trigger-gated evolution).**
 > One read-only `fleet` binary fuses four native sources Claude Code already writes — no hooks, no daemon, no SQLite; the push lane and the store are named, additive later waves with measurable triggers.
-> Confidence: **high** for v1 — the verdict flips only if the maintainer's workflow returns to permission-prompt-gated sessions (then the B hook lane fires early).
+> Confidence: **high** for v1 — the verdict flips only if the operator's workflow returns to permission-prompt-gated sessions (then the B hook lane fires early).
 
 ## Context
 
@@ -116,7 +116,7 @@ sequenceDiagram
     FOLD->>FOLD: fold: busy + pending question → NeedsAnswer (provenance: transcript, fresh)
     FOLD->>UI: row flips to NeedsAnswer (≤ poll/debounce ≈ 1–2 s)
     Note over FOLD,UI: guard: busy + no transcript append > N min → "Stalled?"<br/>(covers the rare non-bypass permission wait A cannot see)
-    UI->>CC: the maintainer hits jump → wezterm cli activate-pane
+    UI->>CC: the operator hits jump → wezterm cli activate-pane
 ```
 
 ## Evolution path
@@ -142,7 +142,7 @@ flowchart LR
 ## Pre-mortem (12 months later, it failed because…)
 
 1. **CC release changed `sessions/<pid>.json` and nobody noticed** — board showed ghost sessions for weeks; trust died. → Detection: doctor drift report at startup; ghost rate visible via /proc disagreement. Response: parser fix + fixture for new version (hours, one sensor).
-2. **A permission prompt sat invisible for an hour** (a non-bypass session crept in); the maintainer reverted to scanning panes manually. → Detection: `Stalled?` state fires; if seen twice, hook-lane trigger has fired — build B wave. Response: pre-planned, additive.
+2. **A permission prompt sat invisible for an hour** (a non-bypass session crept in); the operator reverted to scanning panes manually. → Detection: `Stalled?` state fires; if seen twice, hook-lane trigger has fired — build B wave. Response: pre-planned, additive.
 3. **The fold grew heuristics until nobody could predict the shown status** (agentic-dev amplification of threshold tweaks). → Detection: fold is a pure table-tested function; PR rule — every fold change needs a table row. Response: rules/ discipline, review gate.
 4. **wezterm title format changed; pane match silently degraded to cwd-only** and jump landed on wrong panes for same-cwd sessions. → Detection: match-confidence shown per row; ambiguous matches marked. Response: WSLENV forwarding wave (exact identity), a config-level fix.
 5. **Fleet grew 10×; per-tick rescans lagged the UI.** → Detection: tick-time metric in footer. Response: mtime-gated watch set (already 99% reduction, 01 D3), event-driven only.

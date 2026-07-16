@@ -1,7 +1,7 @@
 ---
 plan: 001-fleetops-architecture
 status: draft
-owner: the maintainer
+owner: the operator
 created: 2026-07-10
 type: research
 ---
@@ -10,9 +10,9 @@ type: research
 
 **Goal:** Decide the data plane, store, and process topology for fleetops — the Rust/ratatui TUI monitoring all local Claude Code sessions (name, status incl. needs-input, tokens, context %, wezterm pane jump).
 
-**Status:** Draft — dossier complete, decision pending the maintainer's acceptance (flip to `active` when accepted).
+**Status:** Draft — dossier complete, decision pending the operator's acceptance (flip to `active` when accepted).
 
-**Trigger:** 2026-07-10 conversation — "monitor all of our open claude code windows"; name `fleetops` chosen; oh-architecture run decreed before specs/code.
+**Trigger:** 2026-07-10 conversation — "monitor all of our open claude code windows"; name `fleetops` chosen; an architecture-dossier run decreed before specs/code.
 
 ## Read order
 

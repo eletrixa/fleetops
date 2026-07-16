@@ -1,6 +1,6 @@
 # 002 — Pane highlighting: research dossier
 
-**Question (the maintainer, 2026-07-10):** Enter-jump works. Can fleetops also highlight the *pane*
+**Question (the operator, 2026-07-10):** Enter-jump works. Can fleetops also highlight the *pane*
 (border color per status), and give a stronger *pane-level* highlight when a session finishes?
 Not the tab — the pane.
 
@@ -42,7 +42,7 @@ session scratchpad `probe/` (hex dumps of OSC 11 query replies).
 | OSC 11 bg-set injected externally via pts | **WORKS, survives ConPTY** | in-pane `\e]11;?` query: `rgb:0000/0000/0000` before → `rgb:4545/2020/2020` after |
 | Per-pane isolation | WORKS | sibling pane in same window stayed `rgb:0000/0000/0000` |
 | OSC 111 reset (undocumented in wezterm docs) | WORKS | query returns exact baseline after reset |
-| BEL → `visual_bell` flash | NEEDS-CONFIG | `visual_bell` unset in the maintainer's `.wezterm.lua`; flash is per-pane once configured, color global |
+| BEL → `visual_bell` flash | NEEDS-CONFIG | `visual_bell` unset in the operator's `.wezterm.lua`; flash is per-pane once configured, color global |
 | OSC 1337 SetUserVar via pts | WORKS (Lua-only observable) | no garbage rendered; not visible in `cli list` (no user-var field — confirmed, 18 fields) |
 | OSC 2 title-set via pts (lane proof) | WORKS | `cli list` TITLE flipped for that pane only |
 
@@ -80,10 +80,10 @@ display this session renders in". Guard: only inject when the session's environ 
   Still no fleet *file* mutation. Consider a `--no-highlight` opt-out flag.
 
 Later, optional: B (one `visual_bell` line in `.wezterm.lua`) stacks a flash on top for
-finish events; C only if the maintainer wants tab-bar coloring and toasts driven from the same state;
+finish events; C only if the operator wants tab-bar coloring and toasts driven from the same state;
 D — thumbs-up and watch [#7641](https://github.com/wezterm/wezterm/issues/7641).
 
-Side note: the maintainer's `.wezterm.lua` already has `CLAUDE_STATUS` user-var tab badges
+Side note: the operator's `.wezterm.lua` already has `CLAUDE_STATUS` user-var tab badges
 (🔔/✅/⏳ + gold blink) fed by `claude-wezterm-status.sh` hooks — that chain was dead only
 because `WEZTERM_PANE` never reached WSL (docs/RESEARCH.md:20-22); spec 005's WSLENV fix
 unblocked it, so tab-level signaling may already work again. Pane-level (this dossier) is new.

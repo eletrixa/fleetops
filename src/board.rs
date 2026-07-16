@@ -58,7 +58,9 @@ pub struct MatchedPane {
     pub tab_id: u64,
     /// wezterm pane id (jump: activate-pane).
     pub pane_id: u64,
-    /// 1-based tab-bar position — what the maintainer sees on the tab bar.
+    /// 0-based tab index — matches `wezterm cli activate-tab --tab-index` (spec 009); emitted
+    /// as-is by the `fleet snapshot` `tab_index` field for automation. The board itself no longer
+    /// displays a tab number (spec 010 replaced the TAB column with the `#` agent-number column).
     pub tab_index: u64,
 }
 
@@ -184,7 +186,7 @@ pub fn sort_rows(rows: &mut [SessionRow]) {
     });
 }
 
-/// Last path segment for display: `/home/user/work/brain` → `brain`; `/` → `/`.
+/// Last path segment for display: `/home/user/project-a` → `project-a`; `/` → `/`.
 pub fn dir_name(cwd: &str) -> &str {
     cwd.rsplit('/').find(|s| !s.is_empty()).unwrap_or("/")
 }
@@ -240,7 +242,7 @@ mod tests {
                 updated_at_ms: 0,
                 version: None,
             },
-            account: Some("golf-acct".to_string()),
+            account: Some("alpha".to_string()),
             wezterm_pane: None,
             pts: None,
         }
@@ -343,7 +345,7 @@ mod tests {
     #[test]
     fn dir_name_table() {
         let cases = [
-            ("/home/user/work/brain", "brain"),
+            ("/home/user/project-a", "project-a"),
             ("/tui/fleetops", "fleetops"),
             ("/tui", "tui"),
             ("/", "/"),

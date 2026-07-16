@@ -230,11 +230,8 @@ mod tests {
     fn slug_table() {
         let cases = [
             ("/tui/fleetops", "-tui-fleetops"),
-            (
-                "/home/user/work/demo_skills",
-                "-home-rob-acme-DEMO-skills",
-            ),
-            ("/home/user/.claude", "-home-rob--claude"),
+            ("/home/user/project-a", "-home-user-project-a"),
+            ("/home/user/.claude", "-home-user--claude"),
             ("/", "-"),
         ];
         for (cwd, want) in cases {

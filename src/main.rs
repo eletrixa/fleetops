@@ -6,8 +6,8 @@
 //! Tested:  n/a (thin shell; all seams tested in their modules)
 //!
 //! Key responsibilities:
-//! - Dispatch: (default) tui board | `--no-highlight` (board, tints off) | doctor. Hand-rolled
-//!   (house style, no clap).
+//! - Dispatch: (default) tui board | `--no-highlight` (board, tints off) | doctor | snapshot
+//!   (headless JSON one-shot). Hand-rolled (house style, no clap).
 //! - Report a fatal error on stderr with exit 1; unknown command exits 2.
 //!
 //! Design constraints:
@@ -15,6 +15,7 @@
 
 mod board;
 mod codex;
+mod collect;
 mod discovery;
 mod doctor;
 mod error;
@@ -23,6 +24,7 @@ mod highlight;
 mod panes;
 mod paths;
 mod runner;
+mod snapshot;
 mod telemetry;
 mod tui;
 
@@ -49,8 +51,19 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE // spec 004: exit 1 when the scan itself failed
             }
         }
+        Some("snapshot") => {
+            let (json, scan_ok) = runtime.block_on(snapshot::run(&runner::Exec));
+            println!("{json}");
+            if scan_ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE // spec 009: exit 1 when the scan itself failed
+            }
+        }
         Some(other) => {
-            eprintln!("fleet: unknown command '{other}' (usage: fleet [--no-highlight|doctor])");
+            eprintln!(
+                "fleet: unknown command '{other}' (usage: fleet [--no-highlight|doctor|snapshot])"
+            );
             ExitCode::from(2)
         }
     }

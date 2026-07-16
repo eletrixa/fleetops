@@ -6,8 +6,8 @@
 ## Sources (verified live 2026-07-10)
 
 - Transcript: `~/.claude/projects/<slug>/<sessionId>.jsonl` where `slug` = session `cwd` with every
-  char outside `[A-Za-z0-9-]` replaced by `-` (verified: `/home/user/work/demo_skills` →
-  `-home-rob-acme-DEMO-skills`; dots and underscores both dash).
+  char outside `[A-Za-z0-9-]` replaced by `-` (verified: `/home/user/my-project` →
+  `-home-user-my-project`; dots and underscores both dash).
 - Lines used (tolerant parse, all other types skipped):
   - `{"type":"assistant","message":{"usage":{input_tokens, cache_read_input_tokens,
     cache_creation_input_tokens, output_tokens}, "content":[...]}}` — context tokens =

@@ -13,3 +13,5 @@ Waves are defined by the architecture dossier in `plans/001-*`.
 | 6 | [006-wave6-pane-highlight](006-wave6-pane-highlight.md) | ✅ done |
 | 7 | [007-wave7-dir-first-badges](007-wave7-dir-first-badges.md) | ✅ done |
 | 8 | [008-wave8-codex-lane](008-wave8-codex-lane.md) | ✅ done |
+| 9 | [009-wave9-snapshot-tab-index](009-wave9-snapshot-tab-index.md) | 🚧 Draft |
+| 10 | [010-wave10-agent-number-age](010-wave10-agent-number-age.md) | 🚧 Draft |

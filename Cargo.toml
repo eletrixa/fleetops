@@ -2,8 +2,13 @@
 name = "fleetops"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.96"
 description = "Fleetops — a TUI monitoring all running Claude Code sessions (the fleet)"
-license = "MIT"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["tui", "cli", "claude", "wezterm", "monitoring"]
+categories = ["command-line-utilities"]
+repository = "https://github.com/eletrixa/fleetops"
 publish = false
 
 [[bin]]

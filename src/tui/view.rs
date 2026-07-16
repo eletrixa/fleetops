@@ -6,8 +6,9 @@
 //! Tested:  inline `#[cfg(test)]` TestBackend render assertions
 //!
 //! Key responsibilities:
-//! - Board table: status | dir (badge: emoji + last cwd folder) | session | ctx% | tokens |
-//!   account | age | tab (tab-bar position) | pane.
+//! - Board table: `#` (agent board number `n`, 1-based row order — the same `n` the snapshot
+//!   emits; spec 010) | status | dir (badge: emoji + last cwd folder) | session | ctx% | tokens |
+//!   account | age | pane.
 //! - Stable per-account color (hash into a 6-color palette); stable per-dir emoji+color badge
 //!   (two independently-seeded hashes); status color from one pure map.
 //! - Footer: session count, needs-answer count, refresh age, key hints, last error, and a
@@ -74,7 +75,7 @@ fn seeded_hash(s: &str, seed: u64) -> u64 {
     x
 }
 
-/// 6-color palette shared by the account and dir badges (6 accounts on this box, spec 004).
+/// 6-color palette shared by the account and dir badges (spec 004).
 const PALETTE: [Color; 6] = [
     Color::Cyan,
     Color::LightMagenta,
@@ -84,39 +85,30 @@ const PALETTE: [Color; 6] = [
     Color::LightRed,
 ];
 
-/// Stable account color: same name → same color, 6-slot palette (6 accounts on this box).
-/// Seed 18 is chosen so the six current accounts (echo-acct/gmail/acme/post/golf-acct/projectz)
-/// land on six DISTINCT slots (spec 004); a future account still gets a stable color, possibly
+/// Stable account color: same name → same color, 6-slot palette.
+/// The seed is chosen so a representative six-account set (alpha/bravo/charlie/delta/echo/november)
+/// lands on six DISTINCT slots (spec 004); a future account still gets a stable color, possibly
 /// colliding (acceptable for a visual aid).
 fn account_color(account: &str) -> Color {
-    const SEED: u64 = 18;
+    const SEED: u64 = 82;
     PALETTE[usize::try_from(seeded_hash(account, SEED) % 6).unwrap_or(0)]
 }
 
 /// Stable dir badge: same dir name -> same emoji + color always (pure hash, like
 /// `account_color`). Emoji and color are hashed with independent seeds so they don't
-/// correlate (12 emoji x 6 colors = 72 effective combos). Seeds 9/5 are tuned so the six real
-/// project dirs on this box (fleetops, tokenomics, brain, projectx, oh, lightrag) land on six
+/// correlate (12 emoji x 6 colors = 72 effective combos). The seeds are tuned so a representative
+/// six project dirs (fleetops, tokenomics, project-a, project-b, project-c, project-d) land on six
 /// distinct (emoji, color) pairs — re-tune if a new project dir collides (same pattern as the
-/// account seed-18 note on `account_color`).
+/// account-seed note on `account_color`).
 fn dir_badge(dir: &str) -> (char, Color) {
     const EMOJI: [char; 12] = [
         '🦀', '🧠', '🚀', '📦', '🌊', '🔥', '🐙', '🎯', '🌿', '💎', '⚡', '🍋',
     ];
-    const EMOJI_SEED: u64 = 9;
-    const COLOR_SEED: u64 = 5;
+    const EMOJI_SEED: u64 = 0;
+    const COLOR_SEED: u64 = 0;
     let emoji = EMOJI[usize::try_from(seeded_hash(dir, EMOJI_SEED) % 12).unwrap_or(0)];
     let color = PALETTE[usize::try_from(seeded_hash(dir, COLOR_SEED) % 6).unwrap_or(0)];
     (emoji, color)
-}
-
-/// TAB cell: the 1-based tab-bar position (what the tab bar shows), `≈?`/`—` when unmatched.
-fn tab_cell(row: &SessionRow) -> String {
-    match (&row.pane, row.pane_ambiguous) {
-        (Some(p), _) => p.tab_index.to_string(),
-        (None, true) => "≈?".to_string(),
-        (None, false) => "—".to_string(),
-    }
 }
 
 fn pane_cell(row: &SessionRow) -> String {
@@ -130,7 +122,7 @@ fn pane_cell(row: &SessionRow) -> String {
 /// Context gauge width in cells.
 const CTX_BAR_WIDTH: u64 = 10;
 
-/// Context gauge: filled blocks over the window, no percentage (visual per the maintainer's ask).
+/// Context gauge: filled blocks over the window, no percentage (visual gauge, no numbers).
 fn ctx_bar(pct: u64) -> String {
     let filled = (pct.min(100) * CTX_BAR_WIDTH).div_ceil(100);
     let mut bar = String::new();
@@ -163,7 +155,7 @@ fn age_style(secs: u64) -> Style {
 
 fn render_table(f: &mut Frame<'_>, area: Rect, app: &App) {
     let header = Row::new([
-        "STATUS", "DIR", "SESSION", "CTX", "TOK", "ACCT", "AGE", "TAB", "PANE",
+        "#", "STATUS", "DIR", "SESSION", "CTX", "TOK", "ACCT", "AGE", "PANE",
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
     let selected = app.selected_index();
@@ -194,6 +186,9 @@ fn render_table(f: &mut Frame<'_>, area: Rect, app: &App) {
             |secs| Cell::from(format_age(secs)).style(age_style(secs)),
         );
         let row = Row::new([
+            // `#`: the agent board number `n` — 1-based row order, the same `n` the snapshot
+            // emits (spec 010). Present on every row (pure order), no unmatched placeholder.
+            Cell::from((i + 1).to_string()),
             Cell::from(label).style(style),
             Cell::from(format!("{dir_emoji} {dir}")).style(Style::default().fg(dir_color)),
             Cell::from(r.name.clone()),
@@ -201,7 +196,6 @@ fn render_table(f: &mut Frame<'_>, area: Rect, app: &App) {
             Cell::from(tok),
             Cell::from(account).style(account_style),
             age_cell,
-            Cell::from(tab_cell(r)),
             Cell::from(pane_cell(r)),
         ]);
         if selected == Some(i) {
@@ -213,6 +207,7 @@ fn render_table(f: &mut Frame<'_>, area: Rect, app: &App) {
     let table = Table::new(
         rows,
         [
+            Constraint::Length(3), // #: agent board number n, leading (spec 010)
             Constraint::Length(10),
             // Fixed, not Max: on a narrow window ratatui squeezes flexible columns first and
             // the badge column collapsed entirely (live-verified at 80 cols — DIR lost to
@@ -221,9 +216,8 @@ fn render_table(f: &mut Frame<'_>, area: Rect, app: &App) {
             Constraint::Min(24),
             Constraint::Length(10),
             Constraint::Length(5),
-            Constraint::Length(8), // longest real account name ("echo-acct"/"projectz")
+            Constraint::Length(8), // longest expected account name (e.g. "november")
             Constraint::Length(4),
-            Constraint::Length(3),
             Constraint::Length(5),
         ],
     )
@@ -295,7 +289,7 @@ mod tests {
         SessionRow {
             session_id: id.to_string(),
             name: name.to_string(),
-            account: Some("golf-acct".to_string()),
+            account: Some("alpha".to_string()),
             status,
             cwd: "/tui/fleetops".to_string(),
             context_tokens: tokens,
@@ -353,7 +347,7 @@ mod tests {
         assert!(screen.contains("? answer"));
         assert!(screen.contains("⠿ working"));
         assert!(screen.contains("Pick an option"));
-        assert!(screen.contains("golf-acct"));
+        assert!(screen.contains("alpha"));
         assert!(
             screen.contains("██████░░░░"),
             "120k of 200k = 60% → 6 of 10 blocks, no percentage text"
@@ -361,7 +355,7 @@ mod tests {
         assert!(!screen.contains('%'), "spec: visual gauge, no percentages");
         assert!(screen.contains("117k"));
         assert!(screen.contains("1m"), "75s age humanized");
-        assert!(screen.contains("TAB"), "tab-bar position column");
+        assert!(screen.contains('#'), "leading # agent-number column");
         assert!(screen.contains("47"), "pane id column");
         assert!(screen.contains("DIR"));
         assert!(
@@ -406,7 +400,7 @@ mod tests {
     fn footer_counts_parse_failures_and_acct_fits_the_longest_account() {
         let mut app = App::default();
         let mut r = row("a", Status::Working, "x", None);
-        r.account = Some("echo-acct".to_string());
+        r.account = Some("november".to_string());
         app.update(Msg::Snapshot(Box::new(Snapshot {
             rows: vec![r],
             stats: ScanStats {
@@ -421,16 +415,16 @@ mod tests {
             screen.contains("⚠ 3 unparseable session files"),
             "format drift must not read as a smaller fleet"
         );
-        assert!(screen.contains("echo-acct"), "8-char account not truncated");
+        assert!(screen.contains("november"), "8-char account not truncated");
     }
 
     #[test]
     fn account_color_is_stable_and_distinct_for_known_accounts() {
-        let a = account_color("golf-acct");
-        assert_eq!(a, account_color("golf-acct"), "stable");
-        // The six real accounts on this box (~/.claude-acct) — spec 004: all distinct.
+        let a = account_color("alpha");
+        assert_eq!(a, account_color("alpha"), "stable");
+        // A representative six-account set — spec 004: all distinct.
         // (The hash seed is tuned to this set; re-tune if an account is renamed.)
-        let accounts = ["echo-acct", "gmail", "acme", "post", "golf-acct", "projectz"];
+        let accounts = ["alpha", "bravo", "charlie", "delta", "echo", "november"];
         let distinct: std::collections::HashSet<_> = accounts
             .iter()
             .map(|a| format!("{:?}", account_color(a)))
@@ -453,11 +447,53 @@ mod tests {
             .lines()
             .find(|l| l.contains("STATUS"))
             .expect("header line with STATUS");
+        let num_pos = header_line.find('#').expect("# in header");
         let status_pos = header_line.find("STATUS").expect("STATUS in header");
         let dir_pos = header_line.find("DIR").expect("DIR in header");
         let session_pos = header_line.find("SESSION").expect("SESSION in header");
+        assert!(num_pos < status_pos, "spec 010: # must precede STATUS");
         assert!(status_pos < dir_pos, "spec 007: STATUS must precede DIR");
         assert!(dir_pos < session_pos, "spec 007: DIR must precede SESSION");
+    }
+
+    #[test]
+    fn hash_column_shows_the_1_based_agent_number_n() {
+        let mut app = App::default();
+        // Two rows; the second has no matched pane — `n` is pure row order, present regardless.
+        let first = row("a", Status::Working, "first-row", Some(50_000));
+        let mut second = row("b", Status::Idle, "second-row", None);
+        second.pane = None;
+        app.update(Msg::Snapshot(Box::new(Snapshot {
+            rows: vec![first, second],
+            ..Snapshot::default()
+        })));
+        let screen = rendered(&app);
+        // Row 1: the leading `#` cell shows agent number 1, before STATUS.
+        let first_line = screen
+            .lines()
+            .find(|l| l.contains("first-row"))
+            .expect("first row line");
+        let n1 = first_line
+            .find('1')
+            .expect("agent number 1 on the first row");
+        let status1 = first_line.find("working").expect("status on the first row");
+        assert!(
+            n1 < status1,
+            "spec 010: the leading # agent number leads the row, before STATUS"
+        );
+        // Row 2: `n` is 2 even though the row has no matched pane (no placeholder for `#`).
+        let second_line = screen
+            .lines()
+            .find(|l| l.contains("second-row"))
+            .expect("second row line");
+        let n2 = second_line
+            .find('2')
+            .expect("agent number 2 on the second (unmatched) row");
+        let status2 = second_line.find("idle").expect("status on the second row");
+        assert!(
+            n2 < status2,
+            "spec 010: n is present on unmatched rows too, before STATUS"
+        );
     }
 
     #[test]
@@ -471,8 +507,15 @@ mod tests {
 
     #[test]
     fn dir_badge_distinct_for_known_dirs() {
-        // The six real project dirs on this box — spec 007: all distinct (emoji, color) pairs.
-        let dirs = ["fleetops", "tokenomics", "brain", "projectx", "oh", "lightrag"];
+        // A representative six project dirs — spec 007: all distinct (emoji, color) pairs.
+        let dirs = [
+            "fleetops",
+            "tokenomics",
+            "project-a",
+            "project-b",
+            "project-c",
+            "project-d",
+        ];
         let distinct: std::collections::HashSet<_> = dirs
             .iter()
             .map(|d| {
@@ -480,11 +523,7 @@ mod tests {
                 (emoji, format!("{color:?}"))
             })
             .collect();
-        assert_eq!(
-            distinct.len(),
-            6,
-            "all six real dirs distinct: {distinct:?}"
-        );
+        assert_eq!(distinct.len(), 6, "all six dirs distinct: {distinct:?}");
     }
 
     #[test]

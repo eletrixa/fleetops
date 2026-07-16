@@ -27,4 +27,3 @@ Find the rule for what you're doing right now.
 | Add a user-facing change | [tools/changelog-workflow](tools/changelog-workflow.md) |
 | Run lints | [tools/linting-workflow](tools/linting-workflow.md) + [tools/when-to-lint](tools/when-to-lint.md) |
 | Handle config/env/secrets | [tools/environment-config](tools/environment-config.md) |
-| Add a repojumper/CLI shortcut | [tools/project-cli-scripts](tools/project-cli-scripts.md) |

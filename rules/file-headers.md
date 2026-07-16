@@ -5,7 +5,6 @@ tags:
   - coding-standards
   - development
 created: 2026-04-12
-original-source: "F:/s/GlobalRules/file-headers.md"
 applies-to: all source files
 ---
 
@@ -100,32 +99,32 @@ Use the language's native block comment syntax with the same fields.
 
 > [!success] Good — concise, useful
 > ```python
-> """Thin INITECH GraphQL client with OAuth2 password grant.
+> """Thin Storefront GraphQL client with OAuth2 password grant.
 > 
-> Project: initechBridge — INITECH -> Odoo 18 one-way sync
-> Module:  src/initech_bridge/clients/initech.py
+> Project: storefront-bridge — Storefront -> ERP one-way sync
+> Module:  src/storefront_bridge/clients/storefront.py
 > Deps:    httpx
-> Tested:  tests/test_clients/test_initech.py
+> Tested:  tests/test_clients/test_storefront.py
 > 
 > Key responsibilities:
 > - OAuth2 token acquisition and refresh
 > - GraphQL query execution with error handling
 > 
 > Design constraints:
-> - Read-only: no mutations against INITECH API
+> - Read-only: no mutations against the Storefront API
 > - Query strings live as module constants, not in separate files
 > """
 > ```
 
 > [!failure] Bad — too generic, no agent value
 > ```python
-> """This file contains the Initech client."""
+> """This file contains the Storefront client."""
 > ```
 
 > [!failure] Bad — too verbose, buries the signal
 > ```python
 > """
-> Created by: the maintainer
+> Created by: <author>
 > Date: 2026-04-12
 > Version: 0.1.0
 > License: MIT

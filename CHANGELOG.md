@@ -2,6 +2,57 @@
 
 ## [Unreleased]
 
+- **Fixed: wezterm socket dir is resolved at runtime, not a hardcoded username** — the
+  release-prep scrub replaced the author's Windows username in the socket-dir constants with a
+  placeholder (`user`), which pointed pane discovery at `/mnt/c/Users/user/.local/share/wezterm`
+  — a path that exists on no real machine, so the board showed zero panes for everyone. The
+  username is now resolved per process: `$WEZTERM_UNIX_SOCKET` (wezterm's own var) if set, else a
+  glob of `/mnt/c/Users/*/.local/share/wezterm` for the dir holding live `gui-sock-*` files
+  (preferring the `$USER`-named dir, else the newest socket). On no match it degrades exactly as
+  before — no per-instance discovery, the board still renders the invoker's own instance.
+
+- **Public-release prep** — repo readied for an open-source release: dual-licensed
+  (MIT OR Apache-2.0) with `LICENSE-MIT` + `LICENSE-APACHE`; Cargo metadata filled in
+  (license, readme, keywords, categories, rust-version); a stranger-facing `README.md`
+  (features, WSL2-only platform note, a "What it reads & privacy" section, unofficial
+  disclaimer); `CONTRIBUTING.md` + `SECURITY.md`; GitHub CI (`fmt`/`clippy`/`test`),
+  Dependabot, and issue templates; a VHS demo recipe (`docs/demo/board.tape`). Fixtures,
+  tests, specs, plans, and rules were scrubbed of machine- and account-specific data
+  (synthetic account/dir/session names; the seed constants behind `account_color`/`dir_badge`
+  re-tuned to the new sample sets). `fleet doctor` now prints a WSL2/Linux hint when `/proc`
+  is absent. `docs/ops/` is no longer tracked.
+
+- **Wave 10 (spec 010): board `#` agent-number column + snapshot `age_secs`** — the board's
+  leading column is now **`#`**, showing the **agent board number `n`** (1-based row order — the
+  same `n` `fleet snapshot` emits), replacing the TAB column (its `tab_index + 1` display and the
+  `tab_cell` placeholder are gone). New order: `# | STATUS | DIR | SESSION | CTX | TOK | ACCT |
+  AGE | PANE` — the **PANE column stays** (the jump target a human reads is the pane id). `n` shows
+  on every row, including sessions with no matched pane (no placeholder — it is pure order). The
+  snapshot JSON is otherwise unchanged: it still carries the 0-based `tab_index` for automation
+  (`wezterm cli activate-tab --tab-index`); the board just stops *displaying* the tab number.
+  - `fleet snapshot` `sessions[]` gains **`age_secs`** (`number|null`) — seconds since the
+    transcript last appended (`SessionRow.secs_since_append`, the raw age the AGE column
+    humanizes), `null` when unknown. Placed after `ctx_pct`; every other field (incl. `tab_index`)
+    unchanged. This lets downstream surfaces (the Stream Deck FLEET badges) show the age without a
+    second telemetry path.
+
+- **Wave 9 (spec 009): `fleet snapshot` + a leading TAB column** — a headless one-shot,
+  `fleet snapshot`, prints ONE JSON object to stdout: `focused_pane_id` (from
+  `wezterm cli list-clients` — the least-idle client's focused pane) plus a `sessions` array
+  carrying exactly the rows the board would render, in the same order (`n`, `name`, `status`
+  = the exact `fold::Status` variant name, `tokens`, `ctx_pct`, `pane_id`, `tab_index`, `cwd`,
+  `session_id`). It reuses the board's own pipeline: the sensor sweep is extracted into
+  `collect::collect`, called by BOTH `tui::sweep` and `snapshot::run`, so a snapshot and the
+  live board can never disagree. Exit 0 on success (even with 0 sessions), non-zero only on scan
+  failure (sessions dir unreadable, same rule as `fleet doctor`). Serialized with `serde_json`
+  (already a dep); no new dependency.
+  - The JSON **`tab_index` is 0-based**, matching `wezterm cli activate-tab --tab-index` (0 =
+    left-most tab) so automation can drive `activate-tab` with it directly. The board's TAB
+    **column displays `tab_index + 1`** — 1-based, matching the wezterm tab bar
+    (`format-tab-title` renders `tab.tab_index + 1`) and the Stream Deck TAB keys (1–6). The
+    column moves to **before STATUS** (`TAB | STATUS | DIR | SESSION | CTX | TOK | ACCT | AGE |
+    PANE`), one column not two, with a dim `—`/`≈?` placeholder when unmatched.
+
 - **Wave 8 (spec 008): Codex CLI sessions on the board** — the fleet now also shows Codex TUI
   sessions (`~/.codex`) alongside Claude ones: same columns, same sort buckets, same Enter-jump
   and pane highlighting. Discovery recognizes a live Codex TUI by `/proc` facts (`comm ==
@@ -73,7 +124,7 @@
 - Board UX: Enter now switches the TAB too (`activate-tab` before `activate-pane` — pane
   activation alone doesn't bring the tab forward). New TAB column right after STATUS showing
   the tab-bar position number (tab emoticons aren't readable via the wezterm CLI — they're
-  drawn by the lua tab formatter). CWD column → DIR: last folder only (`brain`, `contoso`).
+  drawn by the lua tab formatter). CWD column → DIR: last folder only (`project-a`, `project-b`).
 - Wave 5 (spec 005): exact pane identity — `WEZTERM_PANE` now crosses into WSL (WSLENV user
   env var set Windows-side; effective for panes opened after a wezterm restart). Match
   priority: exact env pane > title > cwd; doctor reports the exact-identity count. Installed

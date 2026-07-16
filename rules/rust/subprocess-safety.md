@@ -45,9 +45,9 @@ fn systemd_run_args(spec: &ServerSpec) -> Vec<String> { /* ... */ }
 
 #[test]
 fn injects_reserved_port_and_workdir() {
-    let a = systemd_run_args(&projectx());
+    let a = systemd_run_args(&project());
     assert!(a.contains(&"--setenv=PORT=6555".into()));
-    assert!(a.windows(2).any(|w| w == ["--working-directory", "/home/user/work/projectx"]));
+    assert!(a.windows(2).any(|w| w == ["--working-directory", "/home/user/project"]));
 }
 ```
 

@@ -1,7 +1,7 @@
 # Spec 005 — Wave 5: exact pane identity via WSLENV
 
 > Dossier evolution path, trigger **fired 2026-07-10**: pane-match ambiguity observed live
-> (`≈?` on two contoso sessions sharing cwd + title, and a initech pair). Fix = forward
+> (`≈?` on two sessions sharing cwd + title, and another pair). Fix = forward
 > `WEZTERM_PANE` across the Windows→WSL boundary and use it as the highest-priority match.
 
 ## System change (one-time, outside the repo)

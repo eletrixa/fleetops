@@ -54,7 +54,7 @@ Numbers are stable identifiers. **Once assigned, a number is never reused.** Whe
 |---|---|
 | `009-pilot-operations-hub/` | Standard form |
 | `016-code-audit-v2/` | Versioned with `-vN` suffix |
-| `004-acme-brain/` | Multi-word topic |
+| `004-payment-gateway/` | Multi-word topic |
 | `010-upgrade-deps/` | Single-word topic, no version |
 
 | ❌ | Why |
@@ -70,7 +70,7 @@ Numbers are stable identifiers. **Once assigned, a number is never reused.** Whe
 
 1. **Lowercase only.** Letters, digits, hyphens.
 2. **No date prefixes anywhere.** The `NNN-` prefix carries chronological order; created-date lives in frontmatter.
-3. **Topic must be in the name.** `001/` is forbidden; `001-projectx-homepage/` is fine.
+3. **Topic must be in the name.** `001/` is forbidden; `001-billing-homepage/` is fine.
 4. **Versioning uses `-vN` suffix** (kebab + lowercase v + integer). The first version doesn't get retroactively renamed to `-v1`.
 5. **No spaces, no underscores, no PascalCase, no camelCase, no acronyms-in-caps.**
 6. **Folder name (topic part) is frozen on first `status: active` commit.** Rename freely while `status: draft`. After active, prefer "supersede + cross-link" over renaming.
@@ -199,7 +199,7 @@ git commit -m "plans: archive NNN-name"
 ---
 plan: NNN-my-thing
 status: draft
-owner: the maintainer
+owner: <author>
 created: 2026-05-16
 type: cleanup
 ---
@@ -223,7 +223,7 @@ type: cleanup
 ---
 plan: NNN-my-thing
 status: draft
-owner: the maintainer
+owner: <author>
 created: 2026-05-16
 type: feature
 ---
@@ -305,4 +305,4 @@ A linter script at `scripts/lint-plans.{sh,mjs}` may be added per-project. Until
 
 ## Reference adoption
 
-First adopted in `F:\Acme\projectx` on 2026-05-16 — 18 existing folders renamed in one sweep, 144 cross-reference files swept. See that repo's `plans/018-plans-convention/` for the full deliberation record (brainstorm, discovery, naming-options comparison, inside-shape options, current-state audit).
+First adopted in a sibling repo on 2026-05-16 — an existing set of folders renamed in one sweep, with all cross-reference files swept. That repo keeps the full deliberation record (brainstorm, discovery, naming-options comparison, inside-shape options, current-state audit).

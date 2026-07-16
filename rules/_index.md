@@ -7,8 +7,8 @@ version: 1.0
 
 # Fleetops — Coding Rules
 
-> Rules this project is built against. Ported subset of the global vault rules
-> (`F:/OH/Notes/Global Code Settings/Coding Rules/`) plus Rust/ratatui rules authored for this repo.
+> Rules this project is built against — a curated subset of general coding rules plus
+> Rust/ratatui rules authored for this repo.
 > Check each rule's `applies-to` frontmatter; skip what doesn't match the task.
 
 **Read [[crossroads]] first** to route your current task to the right rule.
@@ -51,4 +51,4 @@ refactor-for-specs → refactor-for-rules per the plan.
 ## Dev workflow (tools)
 
 [tools/](tools/) — changelog-workflow, git-commit-workflow, linting-workflow, when-to-lint,
-plans, project-cli-scripts, environment-config.
+plans, environment-config.

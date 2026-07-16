@@ -19,7 +19,7 @@
 
 1. **`WEZTERM_PANE` never reaches WSL** (WSLENV forwards only TERM vars) — the existing
    `claude-wezterm-status.sh` hook chain is a verified **no-op** on every session (guard exits).
-   The wezterm tab icons the maintainer configured have never fired from WSL sessions.
+   The wezterm tab icons in the user's wezterm config have never fired from WSL sessions.
 2. **One unified store**: every `~/.claude-acct/<acct>/{projects,sessions}` is a symlink to
    `~/.claude/{projects,sessions}` — fleet discovery scans ONE dir; multi-account is a non-problem
    for discovery (but attribution needs /proc).
@@ -34,7 +34,7 @@
    input-blocked state the transcript never shows. **Disproves dossier assumption A6** ("busy
    doesn't distinguish permission-wait"): discovery found it via `fleet doctor`'s unknown-status
    drift report on first live run. Fold maps it to an attention state (`Waiting`).
-6. **Pane `cwd` is useless for WSL sessions**: `wezterm cli list` reports `file:///C:/Users/user/`
+6. **Pane `cwd` is useless for WSL sessions**: `wezterm cli list` reports `file:///C:/Users/<user>/`
    for almost every WSL pane (OSC7 cwd doesn't cross the boundary; only this repo's pane showed
    `file://wsl.localhost/...`). Pane↔session matching is **title-first** (pane title == ai-title
    or native name), cwd as fallback. 12/19 sessions matched at first live run; unmatched ones sit

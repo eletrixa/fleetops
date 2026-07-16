@@ -1,0 +1,47 @@
+name: Bug report
+description: Something in fleetops behaves incorrectly.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        fleetops is WSL2/Linux only. On macOS or native Windows the board is empty by design —
+        that is not a bug. Run `fleet doctor` first; its output is very useful here.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what did you see instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run `fleet …`
+        2. …
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`fleet doctor` output"
+      description: Paste the output of `fleet doctor` (it reads no credentials).
+      render: text
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      placeholder: e.g. 0.1.0 or a git SHA
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      placeholder: WSL distro + version, Rust version, wezterm version
+    validations:
+      required: true

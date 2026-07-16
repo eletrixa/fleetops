@@ -40,6 +40,8 @@ pub struct DoctorFacts {
     pub wezterm: Result<usize, String>,
     /// One instance answered, another failed — the pane list is partial.
     pub instance_error: Option<String>,
+    /// `/proc` is absent — fleetops targets WSL2/Linux; session discovery needs `/proc`.
+    pub proc_missing: bool,
 }
 
 impl Default for DoctorFacts {
@@ -53,6 +55,7 @@ impl Default for DoctorFacts {
             instances: 0,
             wezterm: Err("not checked".to_string()),
             instance_error: None,
+            proc_missing: false,
         }
     }
 }
@@ -62,6 +65,11 @@ pub fn render_report(facts: &DoctorFacts) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     out.push_str("fleet doctor — read-only drift report\n\n");
+    if facts.proc_missing {
+        out.push_str(
+            "  ⚠ /proc not found — fleetops targets WSL2/Linux; the board is empty here\n",
+        );
+    }
     let _ = writeln!(
         out,
         "session files: {} total · {} live · {} stale-dead · {} parse-failed",
@@ -153,6 +161,7 @@ pub async fn run(runner: &dyn Runner) -> (String, bool) {
             instances,
             wezterm,
             instance_error,
+            proc_missing: !Path::new("/proc").is_dir(),
             ..DoctorFacts::default()
         };
         for s in &sessions {
@@ -254,6 +263,19 @@ mod tests {
             "partial pane list is a drift class"
         );
         assert!(report.contains("✗ transcript · ✗ account · ✗ pane — mystery"));
+    }
+
+    #[test]
+    fn missing_proc_prints_a_wsl2_platform_hint() {
+        let facts = DoctorFacts {
+            proc_missing: true,
+            ..DoctorFacts::default()
+        };
+        let report = render_report(&facts);
+        assert!(
+            report.contains("/proc not found — fleetops targets WSL2/Linux"),
+            "missing /proc must surface a platform hint"
+        );
     }
 
     #[test]

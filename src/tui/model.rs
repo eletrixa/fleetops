@@ -321,7 +321,7 @@ mod tests {
         SessionRow {
             session_id: id.to_string(),
             name: format!("session {id}"),
-            account: Some("golf-acct".to_string()),
+            account: Some("alpha".to_string()),
             status,
             cwd: "/tui/x".to_string(),
             context_tokens: Some(50_000),

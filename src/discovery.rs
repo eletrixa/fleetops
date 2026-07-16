@@ -233,9 +233,9 @@ mod tests {
         let f = parse_session_file(FIXTURE).expect("live fixture parses");
         assert_eq!(f.pid, 105_315);
         assert_eq!(f.session_id, "a01d7cea-b33a-4295-aa48-7a058966cdcb");
-        assert_eq!(f.cwd, "/home/user/oh");
+        assert_eq!(f.cwd, "/home/user/project-a");
         assert_eq!(f.proc_start, "126796");
-        assert_eq!(f.name, "oh-fe");
+        assert_eq!(f.name, "project-a-fe");
         assert_eq!(f.status, NativeStatus::Shell);
     }
 
@@ -276,16 +276,16 @@ mod tests {
     #[test]
     fn parse_environ_extracts_account_and_pane() {
         let environ =
-            b"PATH=/usr/bin\0CLAUDE_ACCOUNT=golf-acct\0WEZTERM_PANE=26\0CLAUDE_CONFIG_DIR=/x\0";
+            b"PATH=/usr/bin\0CLAUDE_ACCOUNT=alpha\0WEZTERM_PANE=26\0CLAUDE_CONFIG_DIR=/x\0";
         let facts = parse_environ(environ);
-        assert_eq!(facts.account.as_deref(), Some("golf-acct"));
+        assert_eq!(facts.account.as_deref(), Some("alpha"));
         assert_eq!(facts.wezterm_pane, Some(26));
 
         assert_eq!(parse_environ(b"PATH=/usr/bin\0"), EnvironFacts::default());
         // non-numeric pane id ignored, account still extracted
-        let weird = parse_environ(b"WEZTERM_PANE=abc\0CLAUDE_ACCOUNT=post\0");
+        let weird = parse_environ(b"WEZTERM_PANE=abc\0CLAUDE_ACCOUNT=bravo\0");
         assert_eq!(weird.wezterm_pane, None);
-        assert_eq!(weird.account.as_deref(), Some("post"));
+        assert_eq!(weird.account.as_deref(), Some("bravo"));
     }
 
     /// Build a fake proc root: `<root>/<pid>/stat` (+ optional environ).
@@ -317,7 +317,7 @@ mod tests {
         std::fs::create_dir_all(&proc_root).unwrap();
 
         std::fs::write(sessions.join("1.json"), session_json(1, "100", "busy")).unwrap();
-        fake_proc(&proc_root, 1, "100", Some("golf-acct")); // live
+        fake_proc(&proc_root, 1, "100", Some("alpha")); // live
         std::fs::write(sessions.join("2.json"), session_json(2, "200", "idle")).unwrap();
         fake_proc(&proc_root, 2, "999", None); // PID reused (starttime differs)
         std::fs::write(sessions.join("3.json"), session_json(3, "300", "busy")).unwrap();
@@ -334,7 +334,7 @@ mod tests {
         assert_eq!(stats.live, 1);
         assert_eq!(live.len(), 1);
         assert_eq!(live[0].file.pid, 1);
-        assert_eq!(live[0].account.as_deref(), Some("golf-acct"));
+        assert_eq!(live[0].account.as_deref(), Some("alpha"));
     }
 
     #[test]

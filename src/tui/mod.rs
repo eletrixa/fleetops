@@ -3,15 +3,15 @@
 //! Project: Fleetops — TUI monitoring all running Claude Code sessions (the fleet)
 //! Module:  src/tui/mod.rs
 //! Deps:    ratatui (init/restore + panic hook), crossterm (EventStream), tokio;
-//!          discovery, telemetry, board, codex, panes, runner, paths
-//! Tested:  the seams are tested in keys/model/view/board/codex/…; this loop is the thin I/O shell.
+//!          collect, board, panes, highlight, runner
+//! Tested:  the seams are tested in keys/model/view/board/codex/collect/…; this loop is the thin I/O shell.
 //!
 //! Key responsibilities:
 //! - Own the terminal (via `ratatui::try_init`/`try_restore` — installs the panic hook) and the loop.
-//! - `sweep`: one sensor pass — wezterm list (async, bounded) + sessions scan + transcript tails
-//!   (blocking fs via `spawn_blocking`) → Claude rows assembled, Codex rows appended
-//!   (`codex::scan`), the concatenation sorted once (`board::sort_rows`) → `Snapshot` over the
-//!   mpsc channel (spec 008).
+//! - `sweep`: one sensor pass — wezterm list (async, bounded) handed to `collect::collect`
+//!   (blocking fs via `spawn_blocking`: sessions scan + transcript tails + Codex rows, sorted
+//!   once) → `Snapshot` over the mpsc channel. `collect` is the SAME code `fleet snapshot` runs
+//!   (spec 009), so the board and the snapshot never disagree.
 //!
 //! Design constraints:
 //! - Async work never runs on the UI task — sweeps and jumps are spawned; the loop only `select!`s.
@@ -33,7 +33,7 @@ use crate::error::AppResult;
 use crate::panes::PaneCache;
 use crate::runner::{Exec, Runner};
 use crate::telemetry::TailCache;
-use crate::{board, codex, discovery, highlight, panes, paths};
+use crate::{board, collect, highlight, panes};
 
 use model::{App, Msg, Snapshot};
 
@@ -164,44 +164,27 @@ fn spawn_sweep(
 /// One sensor pass: panes (async) + sessions/transcripts (blocking) → assembled snapshot.
 /// A degraded wezterm lane is a `lane_error`, not a failure — session rows still ship, and the
 /// LAST GOOD pane list keeps TAB/PANE matches alive (stale beats blank; the footer says so).
+/// The row assembly itself is `collect::collect` — the SAME code `fleet snapshot` runs, so the
+/// board and the snapshot can never disagree (spec 009).
 async fn sweep(runner: &dyn Runner, cache: &Arc<Mutex<SweepCaches>>) -> Result<Snapshot, String> {
     let panes_result = panes::list_all_panes(runner).await;
     let cache = Arc::clone(cache);
     tokio::task::spawn_blocking(move || {
-        let claude_dir = paths::claude_dir();
-        let (sessions, stats) =
-            discovery::scan(&claude_dir.join("sessions"), std::path::Path::new("/proc"));
-        let projects = claude_dir.join("projects");
         let mut guard = match cache.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(), // caches are best-effort; still usable
         };
-        let telemetry: Vec<crate::telemetry::Telemetry> = sessions
-            .iter()
-            .map(|s| guard.tails.read(&projects, &s.file.cwd, &s.file.session_id))
-            .collect();
-        let live_ids: Vec<&str> = sessions
-            .iter()
-            .map(|s| s.file.session_id.as_str())
-            .collect();
-        guard.tails.retain(&live_ids);
-        let (pane_rows, lane_error) = guard.panes.fold(panes_result);
-        drop(guard); // release the caches before the (allocating) assemble
-        let mut rows = board::assemble(&sessions, &telemetry, &pane_rows);
-        let codex_rows = codex::scan(
-            &paths::codex_dir(),
-            std::path::Path::new("/proc"),
-            &pane_rows,
-        );
-        let codex_count = codex_rows.len();
-        rows.extend(codex_rows);
-        board::sort_rows(&mut rows);
+        // `collect` is the SAME pipeline `snapshot::run` uses, so the board and the snapshot
+        // can never disagree (spec 009). The caches are held only for its duration, then dropped.
+        let SweepCaches { tails, panes } = &mut *guard;
+        let collected = collect::collect(tails, panes, panes_result);
+        drop(guard); // release the caches before returning (lock-contention hygiene)
         Snapshot {
             seq: 0, // stamped by spawn_sweep
-            rows,
-            stats,
-            lane_error,
-            codex_count,
+            rows: collected.rows,
+            stats: collected.stats,
+            lane_error: collected.lane_error,
+            codex_count: collected.codex_count,
         }
     })
     .await

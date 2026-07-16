@@ -11,8 +11,10 @@
 //!   on the TUI monitor sees zero Claude panes unless each instance is targeted explicitly
 //!   via a WSLENV-forwarded `WEZTERM_UNIX_SOCKET` (verified live 2026-07-10; flag `/w`).
 //! - Parse `cli list --format json` tolerantly; classify titles (braille spinner = Working,
-//!   `✳` = Idle, else not a Claude pane); merge instances; per-instance tab-bar numbering.
-//! - Build `list` / `activate-tab` / `activate-pane` argv+env (pure).
+//!   `✳` = Idle, else not a Claude pane); merge instances; per-window 0-based tab indexing
+//!   (matches `activate-tab --tab-index`).
+//! - Build `list` / `activate-tab` / `activate-pane` / `list-clients` argv+env (pure);
+//!   `focused_pane_id` reads the least-idle client's focused pane (spec 009 `fleet snapshot`).
 //!
 //! Design constraints:
 //! - Glyph convention is undocumented (dossier assumption A2): classification must stay a pure
@@ -47,8 +49,9 @@ pub struct PaneRow {
     pub pane_id: u64,
     /// wezterm tab id — display grouping.
     pub tab_id: u64,
-    /// 1-based position of this pane's tab within its window (the tab-bar number the maintainer sees;
-    /// derived from list order, counting ALL tabs incl. non-Claude ones).
+    /// 0-based index of this pane's tab within its window — matches `wezterm cli activate-tab
+    /// --tab-index` (0 = left-most tab), derived from list order, counting ALL tabs incl.
+    /// non-Claude ones (spec 009; supersedes the wave-7 1-based tab-bar number).
     pub tab_index: u64,
     /// Glyph-derived status.
     pub status: PaneStatus,
@@ -107,6 +110,14 @@ pub fn activate_tab_args(tab_id: u64) -> Vec<String> {
     ]
 }
 
+/// argv for `wezterm.exe cli list-clients --format json` — the focused-pane source (spec 009).
+pub fn list_clients_args() -> Vec<String> {
+    ["cli", "--no-auto-start", "list-clients", "--format", "json"]
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
 /// The wezterm binary as reachable from WSL2.
 pub const WEZTERM: &str = "wezterm.exe";
 /// Where the interop binary actually lives on this box — the fallback when fleet is launched
@@ -139,10 +150,141 @@ fn wezterm_program() -> String {
         .clone()
 }
 
-/// Where wezterm instance sockets live, WSL- and Windows-form. This box's layout (single-user
-/// tool); doctor prints what was found there.
-const SOCK_DIR_WSL: &str = "/mnt/c/Users/user/.local/share/wezterm";
-const SOCK_DIR_WIN: &str = "C:\\Users\\user\\.local\\share\\wezterm";
+/// Where a wezterm instance's `gui-sock-<pid>` files live, in the two forms `discover_sockets`
+/// needs: `wsl` to stat the files from WSL, `win` to build the Windows-form `WEZTERM_UNIX_SOCKET`
+/// value forwarded back to `wezterm.exe`. Both derive from one resolved Windows username.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SockDir {
+    wsl: std::path::PathBuf,
+    win: String,
+}
+
+/// Resolve the wezterm socket directory at runtime — the Windows username is a machine fact, not
+/// a compile-time constant. Order (first hit wins, cheapest first):
+/// 1. `$WEZTERM_UNIX_SOCKET` — wezterm's own var, pointing straight at the invoking pane's
+///    socket; its parent directory is authoritative, no guessing.
+/// 2. Glob `<glob_root>/*/.local/share/wezterm` for a dir holding a `gui-sock-*` file; one match
+///    wins outright, several prefer the `$USER`-named dir, else the newest socket's dir.
+/// 3. `None` — the caller degrades to the invoker's own instance (the board still works).
+///
+/// `glob_root` is a seam: production passes `/mnt/c/Users`, tests a temp layout. Pure over its
+/// inputs so the whole ladder is unit-tested without touching the real filesystem or env.
+/// ponytail: assumes the default `~/.local/share/wezterm` layout under `/mnt/c/Users/<name>`; a
+/// Windows-side custom `$XDG_DATA_HOME` is only followed via branch 1's `WEZTERM_UNIX_SOCKET`.
+fn resolve_sock_dir(
+    glob_root: &std::path::Path,
+    env_socket: Option<&str>,
+    user: Option<&str>,
+) -> Option<SockDir> {
+    if let Some(sock) = env_socket.filter(|s| !s.is_empty()) {
+        if let Some(dir) = sock_dir_from_socket(sock) {
+            return Some(dir);
+        }
+    }
+    let mut candidates = glob_wezterm_dirs(glob_root);
+    let chosen = match candidates.len() {
+        0 => return None,
+        1 => candidates.remove(0),
+        _ => pick_user_dir(candidates, user),
+    };
+    Some(sock_dir_from_wsl(&chosen))
+}
+
+/// Both dir forms from `$WEZTERM_UNIX_SOCKET` (a `.../gui-sock-N` path) — its parent is the dir.
+/// A `/`-leading value is a WSL path; anything else is a Windows path (`C:\…` or `C:/…`).
+fn sock_dir_from_socket(sock: &str) -> Option<SockDir> {
+    if sock.starts_with('/') {
+        let wsl = std::path::Path::new(sock).parent()?.to_path_buf();
+        let win = wsl_to_win(&wsl)?;
+        Some(SockDir { wsl, win })
+    } else {
+        let (dir, _) = sock.rsplit_once(['\\', '/'])?;
+        let win = dir.replace('/', "\\");
+        let wsl = win_to_wsl(&win)?;
+        Some(SockDir { wsl, win })
+    }
+}
+
+/// A resolved WSL dir → both forms (Windows form best-effort; unused when spawning is impossible,
+/// e.g. a temp-dir test root that does not live under `/mnt/<drive>`).
+fn sock_dir_from_wsl(wsl: &std::path::Path) -> SockDir {
+    let win = wsl_to_win(wsl).unwrap_or_else(|| wsl.to_string_lossy().into_owned());
+    SockDir {
+        wsl: wsl.to_path_buf(),
+        win,
+    }
+}
+
+/// `/mnt/c/Users/user/x` → `C:\Users\user\x`. `None` if not under `/mnt/<drive>/`.
+fn wsl_to_win(wsl: &std::path::Path) -> Option<String> {
+    let (drive, path) = wsl.to_str()?.strip_prefix("/mnt/")?.split_once('/')?;
+    Some(format!(
+        "{}:\\{}",
+        drive.to_ascii_uppercase(),
+        path.replace('/', "\\")
+    ))
+}
+
+/// `C:\Users\user\x` (or `C:/Users/user/x`) → `/mnt/c/Users/user/x`. `None` if not `<drive>:`-rooted.
+fn win_to_wsl(win: &str) -> Option<std::path::PathBuf> {
+    let norm = win.replace('\\', "/");
+    let (drive, rest) = norm.split_once(":/")?;
+    let drive = drive.chars().next()?.to_ascii_lowercase();
+    Some(std::path::PathBuf::from(format!("/mnt/{drive}/{rest}")))
+}
+
+/// Every `<glob_root>/<user>/.local/share/wezterm` that exists and holds a `gui-sock-*` file.
+fn glob_wezterm_dirs(glob_root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let Ok(entries) = std::fs::read_dir(glob_root) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|e| e.path().join(".local/share/wezterm"))
+        .filter(|dir| newest_sock_mtime(dir).is_some())
+        .collect()
+}
+
+/// Among several candidate dirs, prefer the one named for `$USER`; else the newest socket's dir.
+fn pick_user_dir(candidates: Vec<std::path::PathBuf>, user: Option<&str>) -> std::path::PathBuf {
+    if let Some(u) = user {
+        // The `<user>` segment is the dir 3 levels above `.local/share/wezterm`.
+        if let Some(hit) = candidates
+            .iter()
+            .find(|d| d.ancestors().nth(3).and_then(|p| p.file_name()) == Some(u.as_ref()))
+        {
+            return hit.clone();
+        }
+    }
+    candidates
+        .into_iter()
+        .max_by_key(|d| newest_sock_mtime(d))
+        .unwrap_or_default()
+}
+
+/// The newest `gui-sock-*` mtime in `dir`, or `None` if the dir holds no socket file.
+fn newest_sock_mtime(dir: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().starts_with("gui-sock-"))
+        .filter_map(|e| e.metadata().ok()?.modified().ok())
+        .max()
+}
+
+/// The wezterm socket dir, resolved once per process (`None` = not found → own-instance fallback).
+/// Globbing `/mnt/c` is drvfs-slow, so this only ever runs inside `discover_sockets`' blocking task.
+fn sock_dir() -> Option<SockDir> {
+    static DIR: std::sync::OnceLock<Option<SockDir>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        resolve_sock_dir(
+            std::path::Path::new("/mnt/c/Users"),
+            std::env::var("WEZTERM_UNIX_SOCKET").ok().as_deref(),
+            std::env::var("USER").ok().as_deref(),
+        )
+    })
+    .clone()
+}
 
 /// argv for `tasklist.exe` filtered to wezterm-gui processes, CSV form.
 pub fn tasklist_args() -> Vec<String> {
@@ -191,15 +333,15 @@ fn socket_env(socket_win: &str) -> Vec<(String, String)> {
 pub async fn discover_sockets(runner: &dyn Runner) -> AppResult<Vec<String>> {
     let bytes = runner.run(&tasklist_spec()).await?;
     let pids = parse_tasklist_pids(&bytes);
-    // /mnt/c (drvfs) stats can block for seconds — never on an async runtime worker.
+    // /mnt/c (drvfs) stats can block for seconds — never on an async runtime worker. Resolving the
+    // socket dir globs /mnt/c too (same drvfs cost), so it also happens here, cached per process.
     tokio::task::spawn_blocking(move || {
+        let Some(dir) = sock_dir() else {
+            return Vec::new(); // no wezterm dir on this box — degrade to the invoker's own instance
+        };
         pids.into_iter()
-            .filter(|pid| {
-                std::path::Path::new(SOCK_DIR_WSL)
-                    .join(format!("gui-sock-{pid}"))
-                    .is_file()
-            })
-            .map(|pid| format!("{SOCK_DIR_WIN}\\gui-sock-{pid}"))
+            .filter(|pid| dir.wsl.join(format!("gui-sock-{pid}")).is_file())
+            .map(|pid| format!("{}\\gui-sock-{pid}", dir.win))
             .collect()
     })
     .await
@@ -310,6 +452,77 @@ pub fn activate_tab_spec(socket_win: &str, tab_id: u64) -> CommandSpec {
     wezterm_spec(socket_win, activate_tab_args(tab_id))
 }
 
+/// Build the bounded `list-clients` command against one instance ("" = invoker's own).
+pub fn list_clients_spec(socket_win: &str) -> CommandSpec {
+    wezterm_spec(socket_win, list_clients_args())
+}
+
+/// One `list-clients` client entry — only the two fields the focused-pane pick needs.
+#[derive(Debug, Deserialize)]
+struct RawClient {
+    #[serde(default)]
+    focused_pane_id: Option<u64>,
+    #[serde(default)]
+    idle_time: Option<RawDuration>,
+}
+
+/// wezterm serializes a `Duration` as `{secs, nanos}`; only whole seconds matter here.
+#[derive(Debug, Deserialize)]
+struct RawDuration {
+    #[serde(default)]
+    secs: u64,
+}
+
+/// Parse `list-clients --format json` → `(focused_pane_id, idle_secs)` per client that has a
+/// focused pane. Tolerant: garbage or an unexpected shape yields an empty list (the focused
+/// pane is best-effort, never an error). A client with no `idle_time` sorts last (`u64::MAX`).
+pub fn parse_clients(bytes: &[u8]) -> Vec<(u64, u64)> {
+    let clients: Vec<RawClient> = serde_json::from_slice(bytes).unwrap_or_default();
+    clients
+        .into_iter()
+        .filter_map(|c| Some((c.focused_pane_id?, c.idle_time.map_or(u64::MAX, |d| d.secs))))
+        .collect()
+}
+
+/// The focused pane across all clients: the one with the least idle time (the client the user is
+/// actively on). `None` when no client reports a focused pane.
+/// ponytail: least-idle is a heuristic; if multiple GUIs are ever active at once and this picks
+/// the wrong one, key on the client whose pane is also `is_active` in the pane list.
+pub fn pick_focused_pane_id(clients: &[(u64, u64)]) -> Option<u64> {
+    clients
+        .iter()
+        .min_by_key(|(_, idle)| *idle)
+        .map(|(pane, _)| *pane)
+}
+
+/// The fleet's focused pane id: query `list-clients` on every live instance (own instance when
+/// none is discovered, mirroring `list_all_panes`) and pick the least-idle client's focused pane
+/// (spec 009). Best-effort — an unreachable lane is `None`, never an error.
+pub async fn focused_pane_id(runner: &dyn Runner) -> Option<u64> {
+    let sockets = discover_sockets(runner).await.unwrap_or_default();
+    let sockets = if sockets.is_empty() {
+        vec![String::new()]
+    } else {
+        sockets
+    };
+    let queries = sockets.iter().map(|s| {
+        let spec = list_clients_spec(s);
+        async move {
+            runner
+                .run(&spec)
+                .await
+                .map(|bytes| parse_clients(&bytes))
+                .unwrap_or_default()
+        }
+    });
+    let clients: Vec<(u64, u64)> = futures::future::join_all(queries)
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+    pick_focused_pane_id(&clients)
+}
+
 /// Run `cli list` against one instance and return its Claude pane rows, sorted by `pane_id`.
 pub async fn list_panes(runner: &dyn Runner, socket_win: &str) -> AppResult<Vec<PaneRow>> {
     let bytes = runner.run(&list_spec(socket_win)).await?;
@@ -321,9 +534,10 @@ pub async fn list_panes(runner: &dyn Runner, socket_win: &str) -> AppResult<Vec<
 pub fn parse_pane_list(bytes: &[u8], socket_win: &str) -> AppResult<Vec<PaneRow>> {
     let raw: Vec<RawPane> =
         serde_json::from_slice(bytes).map_err(|e| AppError::Parse(format!("wezterm list: {e}")))?;
-    // Tab-bar numbering: wezterm lists panes in window/tab order, so a tab's 1-based position
-    // within its window = order of first appearance. Counted over ALL panes (non-Claude tabs
-    // occupy tab-bar slots too) BEFORE the pane_id sort below destroys that order.
+    // Tab indexing: wezterm lists panes in window/tab order, so a tab's 0-based index within its
+    // window = order of first appearance (matches `activate-tab --tab-index`, 0 = left-most).
+    // Counted over ALL panes (non-Claude tabs occupy tab slots too) BEFORE the pane_id sort
+    // below destroys that order.
     let mut tab_positions: std::collections::HashMap<(u64, u64), u64> =
         std::collections::HashMap::new();
     let mut per_window: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
@@ -332,8 +546,9 @@ pub fn parse_pane_list(bytes: &[u8], socket_win: &str) -> AppResult<Vec<PaneRow>
             .entry((p.window_id, p.tab_id))
             .or_insert_with(|| {
                 let counter = per_window.entry(p.window_id).or_insert(0);
+                let index = *counter; // 0-based: assign, then advance
                 *counter += 1;
-                *counter
+                index
             });
     }
     let mut rows: Vec<PaneRow> = raw
@@ -414,8 +629,9 @@ mod tests {
             .expect("this session's pane is in the fixture");
         assert_eq!(fleet.status, PaneStatus::Working);
         assert_eq!(fleet.cwd, "/tui/fleetops");
-        // Fixture order: tab 1 first, then tab 3 (this pane) — 2nd slot on the tab bar.
-        assert_eq!(fleet.tab_index, 2);
+        // Fixture order: tab_id 1 first, then tab_id 3 (this pane) — the 2nd tab → 0-based
+        // index 1 (matches `activate-tab --tab-index`, spec 009).
+        assert_eq!(fleet.tab_index, 1);
     }
 
     #[test]
@@ -665,6 +881,39 @@ garbage line\r\n";
     }
 
     #[test]
+    fn parse_clients_extracts_focused_pane_and_idle_secs() {
+        // Ground-truthed shape (list-clients --format json, captured live 2026-07-12).
+        let json = br#"[{"username":"user","hostname":"host","pid":12848,"connection_elapsed":{"secs":25969,"nanos":7},"idle_time":{"secs":3,"nanos":7},"workspace":"default","focused_pane_id":21,"ssh_auth_sock":null},{"pid":2,"idle_time":{"secs":100,"nanos":0},"focused_pane_id":5}]"#;
+        assert_eq!(parse_clients(json), vec![(21, 3), (5, 100)]);
+        // A client with no focused pane is skipped; a missing idle_time sorts last.
+        let j2 = br#"[{"idle_time":{"secs":1}},{"focused_pane_id":9}]"#;
+        assert_eq!(parse_clients(j2), vec![(9, u64::MAX)]);
+        // Garbage / wrong shape → empty, never an error (focused pane is best-effort).
+        assert!(parse_clients(b"not json").is_empty());
+        assert!(parse_clients(b"[]").is_empty());
+    }
+
+    #[test]
+    fn pick_focused_pane_id_prefers_the_least_idle_client() {
+        assert_eq!(pick_focused_pane_id(&[(21, 3), (5, 100)]), Some(21));
+        assert_eq!(pick_focused_pane_id(&[(5, 100), (21, 3)]), Some(21));
+        assert_eq!(pick_focused_pane_id(&[]), None);
+    }
+
+    #[tokio::test]
+    async fn focused_pane_id_falls_back_to_own_instance_and_picks_the_focused_pane() {
+        // Empty tasklist → no instances discovered → fall back to the invoker's own instance →
+        // exactly one list-clients call answers the focused pane.
+        let tasklist = b"INFO: No tasks are running.\r\n".to_vec();
+        let clients = br#"[{"idle_time":{"secs":2},"focused_pane_id":21}]"#.to_vec();
+        let runner = CannedRunner::new_seq(vec![Ok(tasklist), Ok(clients)]);
+        assert_eq!(focused_pane_id(&runner).await, Some(21));
+        let specs = runner.all_specs();
+        assert_eq!(specs.len(), 2, "tasklist then list-clients");
+        assert_eq!(specs[1].args, list_clients_args());
+    }
+
+    #[test]
     fn jump_specs_carry_the_socket_env() {
         let tab = activate_tab_spec("C:\\sock-a", 7);
         assert_eq!(
@@ -674,5 +923,125 @@ garbage line\r\n";
         assert_eq!(tab.env[0].1, "C:\\sock-a");
         let pane = activate_pane_spec("", 9);
         assert!(pane.env.is_empty(), "own instance needs no socket env");
+    }
+
+    /// Build `<root>/<user>/.local/share/wezterm/gui-sock-<pid>` and return the socket path.
+    fn mk_sock(root: &std::path::Path, user: &str, pid: u32) -> std::path::PathBuf {
+        let dir = root.join(user).join(".local/share/wezterm");
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join(format!("gui-sock-{pid}"));
+        std::fs::write(&sock, b"").unwrap();
+        sock
+    }
+
+    fn set_mtime(f: &std::path::Path, secs: u64) {
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+        std::fs::File::options()
+            .write(true)
+            .open(f)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+    }
+
+    fn tmp_root(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("fleet-sock-{}-{tag}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn resolve_sock_dir_env_socket_is_authoritative_both_forms() {
+        // Windows-form value → parent dir, WSL form derived. Glob root is irrelevant (not touched).
+        let got = resolve_sock_dir(
+            std::path::Path::new("/nonexistent"),
+            Some("C:\\Users\\user\\.local\\share\\wezterm\\gui-sock-42"),
+            None,
+        )
+        .expect("env socket resolves");
+        assert_eq!(got.win, "C:\\Users\\user\\.local\\share\\wezterm");
+        assert_eq!(
+            got.wsl,
+            std::path::Path::new("/mnt/c/Users/user/.local/share/wezterm")
+        );
+
+        // WSL-form value → same dir, Windows form derived back.
+        let got = resolve_sock_dir(
+            std::path::Path::new("/nonexistent"),
+            Some("/mnt/c/Users/user/.local/share/wezterm/gui-sock-42"),
+            None,
+        )
+        .expect("wsl-form env socket resolves");
+        assert_eq!(
+            got.wsl,
+            std::path::Path::new("/mnt/c/Users/user/.local/share/wezterm")
+        );
+        assert_eq!(got.win, "C:\\Users\\user\\.local\\share\\wezterm");
+    }
+
+    #[test]
+    fn resolve_sock_dir_globs_the_single_user_dir_that_has_a_socket() {
+        let root = tmp_root("single");
+        mk_sock(&root, "rob", 7);
+        // A user dir whose wezterm folder holds NO socket must be ignored, not chosen.
+        std::fs::create_dir_all(root.join("empty/.local/share/wezterm")).unwrap();
+
+        let got = resolve_sock_dir(&root, None, None).expect("one socketed dir resolves");
+        assert_eq!(got.wsl, root.join("rob/.local/share/wezterm"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn resolve_sock_dir_none_when_no_dir_holds_a_socket() {
+        let root = tmp_root("none");
+        std::fs::create_dir_all(root.join("rob/.local/share/wezterm")).unwrap(); // dir, no socket
+        assert_eq!(resolve_sock_dir(&root, None, None), None);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn resolve_sock_dir_multi_user_prefers_the_current_user_over_mtime() {
+        let root = tmp_root("multi-user");
+        let alice = mk_sock(&root, "alice", 1);
+        mk_sock(&root, "rob", 2);
+        // alice's socket is newer, but $USER=rob must still win.
+        set_mtime(&alice, 9_000);
+        let got = resolve_sock_dir(&root, None, Some("rob")).expect("resolves");
+        assert_eq!(got.wsl, root.join("rob/.local/share/wezterm"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn resolve_sock_dir_multi_user_falls_back_to_newest_socket() {
+        let root = tmp_root("multi-mtime");
+        let older = mk_sock(&root, "alice", 1);
+        let newer = mk_sock(&root, "bob", 2);
+        set_mtime(&older, 1_000);
+        set_mtime(&newer, 2_000);
+        // No matching $USER → newest socket's dir wins.
+        let got = resolve_sock_dir(&root, None, Some("nobody")).expect("resolves");
+        assert_eq!(got.wsl, root.join("bob/.local/share/wezterm"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn path_converters_round_trip() {
+        assert_eq!(
+            wsl_to_win(std::path::Path::new("/mnt/c/Users/user/x")).unwrap(),
+            "C:\\Users\\user\\x"
+        );
+        assert_eq!(
+            win_to_wsl("C:\\Users\\user\\x").unwrap(),
+            std::path::Path::new("/mnt/c/Users/user/x")
+        );
+        // wezterm.exe accepts forward slashes too.
+        assert_eq!(
+            win_to_wsl("C:/Users/user/x").unwrap(),
+            std::path::Path::new("/mnt/c/Users/user/x")
+        );
+        // Non-convertible inputs degrade to None (caller keeps the WSL form).
+        assert!(wsl_to_win(std::path::Path::new("/home/user/x")).is_none());
+        assert!(win_to_wsl("not-a-win-path").is_none());
     }
 }

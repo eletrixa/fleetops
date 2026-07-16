@@ -53,7 +53,7 @@ No. Anthropic's tracker: #13024 (open) — no WaitingForInput hook; Stop fires o
 - **Hooks** — PRAISE: event-driven, instant, no polling, survives detach. PAIN: settings.json mutation + drift, idle_prompt 60s/buggy, AskUserQuestion uncovered, headless `claude -p` unreliable (#40506), broken hook spams every session's UI (unless `async:true`).
 - **JSONL** — PRAISE: richest data (tokens/context/cost/titles), retroactive, no ownership. PAIN: status lag, permission prompts invisible, CPU on large files, schema churn per release.
 - **Process signals** — PRAISE: trivial, universal. PAIN: 2-state only, CPU-bug confounded.
-- **Wrapper** — PRAISE: the only deterministic permission interception. PAIN: owns the launch (breaks the maintainer's plain-wezterm workflow), restart to adopt, protocol churn.
+- **Wrapper** — PRAISE: the only deterministic permission interception. PAIN: owns the launch (breaks the operator's plain-wezterm workflow), restart to adopt, protocol churn.
 
 ## Agentic-era note
 

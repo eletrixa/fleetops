@@ -1,6 +1,6 @@
 # Spec 008 — Wave 8: Codex sessions on the board
 
-> the maintainer, 2026-07-10: "we also started using codex here in wsl so it would be good if you
+> The maintainer requested: "we also started using codex here in wsl so it would be good if you
 > would also register Codex open windows." Recon (verified live, codex-cli 0.144.1): Codex
 > TUI = node shim + `codex` musl child; environ carries `WEZTERM_PANE` + `TERM_PROGRAM`;
 > `fd/1 → /dev/pts/N`; transcript = `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`

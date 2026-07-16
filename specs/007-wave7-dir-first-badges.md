@@ -1,6 +1,6 @@
 # Spec 007 — Wave 7: DIR up front, with a project badge (emoji + color)
 
-> the maintainer, 2026-07-10: "move dir instead of Tab so its status, DIR SESSION CTX and then the
+> The maintainer requested: "move dir instead of Tab so its status, DIR SESSION CTX and then the
 > rest. also try to DIR somehow color code and use emoticons so its visually clear what dir
 > project it is — that is important."
 
@@ -25,9 +25,9 @@
 - Color palette: the 6 bright ratatui colors (as `account_color`), hashed with an
   **independent seed** so emoji and color don't correlate — 72 effective combos.
 - Hash: djb2 + splitmix64 finalizer (copy the `account_color` recipe; different seeds for the
-  emoji pick and the color pick). Tune seeds so the current real project dirs on this box —
-  `fleetops`, `tokenomics`, `brain`, `projectx`, `oh`, `lightrag` — get 6 distinct
-  (emoji, color) pairs (same pattern as the account seed-18 note).
+  emoji pick and the color pick). Tune seeds so a representative set of project dirs —
+  `fleetops`, `tokenomics`, `project-a`, `project-b`, `project-c`, `project-d` — get 6 distinct
+  (emoji, color) pairs (same pattern as the account-seed note).
 
 ## Seams & tests
 

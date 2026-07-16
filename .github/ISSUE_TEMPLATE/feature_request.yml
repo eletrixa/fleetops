@@ -1,0 +1,28 @@
+name: Feature request
+description: Suggest an idea for fleetops.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        fleetops is passively maintained and deliberately small. Features are added only as they
+        earn their keep — a clear problem statement helps a lot.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: The situation you hit, not just the solution you have in mind.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
