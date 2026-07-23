@@ -99,11 +99,15 @@ impl ProcFacts for MacProc {
         let (argv, env_block) = match fleetops_procargs::procargs2(pid) {
             Ok(raw) => {
                 procargs::decode(&raw).map_or((AcqResult::Malformed, AcqResult::Malformed), |p| {
-                    let env = if p.env_region.iter().any(|&b| b != 0) {
-                        AcqResult::Ok(p.env_region)
-                    } else {
-                        // argv intact, env region empty → the cs_restricted omission shape.
+                    let env = if p.env_region.iter().all(|&b| b == 0) {
+                        // argv intact, env region empty/padding-only → cs_restricted shape.
                         AcqResult::Unavailable
+                    } else if p.env_region.last() != Some(&0) {
+                        // Unterminated tail = kernel truncation mid-string — a partial var
+                        // must never reach parse_environ as if complete.
+                        AcqResult::Malformed
+                    } else {
+                        AcqResult::Ok(p.env_region)
                     };
                     (AcqResult::Ok(p.argv), env)
                 })
@@ -117,9 +121,12 @@ impl ProcFacts for MacProc {
             Ok(target) => AcqResult::Ok(target.filter(|t| t.starts_with(self.pty_prefix()))),
             Err(()) => AcqResult::Denied,
         };
-        // Race re-read: BOTH tvsec and tvusec must be unchanged.
-        if start_id(pid).as_ref() != Some(&id_before) {
-            return SnapshotOutcome::Raced;
+        // Race re-read: BOTH tvsec and tvusec must be unchanged. A vanished process is `Gone`
+        // (normal exit mid-sweep), NOT `Raced`.
+        match start_id(pid) {
+            None => return SnapshotOutcome::Gone,
+            Some(ref id_after) if id_after != &id_before => return SnapshotOutcome::Raced,
+            Some(_) => {}
         }
         let StartId::Mac { tvsec, .. } = id_before else {
             unreachable!("mac provider builds mac ids");

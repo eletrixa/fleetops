@@ -223,7 +223,11 @@ pub async fn run(runner: &dyn Runner) -> (String, bool) {
 
     let facts = tokio::task::spawn_blocking(move || {
         let proc = platform::provider();
-        let (sessions, scan, platform_stats) = discovery::scan(&claude_dir.join("sessions"), &proc);
+        let (sessions, scan, mut platform_stats) =
+            discovery::scan(&claude_dir.join("sessions"), &proc);
+        // The Codex lane acquires platform facts too — its drift belongs in this report.
+        let (_codex_rows, codex_platform) = crate::codex::scan(&paths::codex_dir(), &proc, &[]);
+        platform_stats.absorb(&codex_platform);
         let mut cache = TailCache::default();
         let projects = claude_dir.join("projects");
         let mut facts = DoctorFacts {

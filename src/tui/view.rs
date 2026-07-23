@@ -278,6 +278,12 @@ fn render_footer(f: &mut Frame<'_>, area: Rect, app: &App) {
     } else {
         String::new()
     };
+    // Acquisition/liveness drift must never be silent — one number here, breakdown in doctor.
+    let drift_warn = if app.drift > 0 {
+        format!("⚠ {} drift (see fleet doctor) · ", app.drift)
+    } else {
+        String::new()
+    };
     // Codex rows aren't tallied in `ScanStats.live` (Claude-only) — spec 008 surfaces them here.
     let codex_suffix = if app.codex_count > 0 {
         format!(" · {} codex", app.codex_count)
@@ -285,7 +291,7 @@ fn render_footer(f: &mut Frame<'_>, area: Rect, app: &App) {
         String::new()
     };
     let stats = format!(
-        "{dir_warn}{parse_warn}{} live · {} need answer · {} stale files · refreshed {}s ago{codex_suffix}",
+        "{dir_warn}{parse_warn}{drift_warn}{} live · {} need answer · {} stale files · refreshed {}s ago{codex_suffix}",
         app.stats.live, needs, app.stats.stale_dead, app.refresh_age_secs
     );
     // Spec 004: stats PLUS the error — an error must not hide the freshness/counts.

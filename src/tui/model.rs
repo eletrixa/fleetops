@@ -59,6 +59,10 @@ pub struct Snapshot {
     /// this is > 0 (spec 008; Codex rows aren't counted in `ScanStats.live`, which is
     /// Claude-only).
     pub codex_count: usize,
+    /// Platform + pane acquisition drift signals this sweep (one number; `fleet doctor` has
+    /// the per-class breakdown). Footer shows `⚠ N drift` when > 0 — drift must never be
+    /// silent (wave 7).
+    pub drift: usize,
 }
 
 /// Everything the event loop can feed the model.
@@ -83,6 +87,8 @@ pub struct App {
     pub stats: ScanStats,
     /// Live Codex rows in the latest snapshot — the footer's `· N codex` suffix (spec 008).
     pub codex_count: usize,
+    /// Drift-signal total from the latest snapshot (footer `⚠ N drift`).
+    pub drift: usize,
     /// Selected session's id (survives refreshes); `None` when the board is empty.
     pub selected: Option<String>,
     /// Seconds since the last successful sweep.
@@ -139,6 +145,7 @@ impl App {
                 self.rows = snapshot.rows;
                 self.stats = snapshot.stats;
                 self.codex_count = snapshot.codex_count;
+                self.drift = snapshot.drift;
                 self.refresh_age_secs = 0;
                 self.error = snapshot.lane_error;
                 self.reselect(old_index);

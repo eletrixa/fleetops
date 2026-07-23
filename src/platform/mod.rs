@@ -167,6 +167,18 @@ impl PlatformStats {
         }
     }
 
+    /// Total drift/acquisition signals — the board footer's one-number summary (the doctor
+    /// has the per-class breakdown).
+    pub const fn total(&self) -> usize {
+        self.date_parse_failed
+            + self.start_mismatch
+            + self.env_denied
+            + self.env_unavailable
+            + self.env_malformed
+            + self.fd1_denied
+            + self.identity_raced
+    }
+
     /// Tally one liveness verdict (only the non-Match outcomes count).
     pub const fn count_liveness(&mut self, verdict: Liveness) {
         match verdict {

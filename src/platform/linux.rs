@@ -122,9 +122,12 @@ impl ProcFacts for LinuxProc {
                 .filter(|t| t.starts_with(self.pty_prefix())),
         );
         // Race re-read: the LOSSLESS identity must be unchanged, or the facts above may belong
-        // to a reused PID.
-        if self.start_ticks(pid).as_deref() != Some(ticks_before.as_str()) {
-            return SnapshotOutcome::Raced;
+        // to a reused PID. A vanished process is `Gone` (normal exit mid-sweep), NOT `Raced` —
+        // conflating them would inflate the identity_raced drift counter.
+        match self.start_ticks(pid) {
+            None => return SnapshotOutcome::Gone,
+            Some(ticks_after) if ticks_after != ticks_before => return SnapshotOutcome::Raced,
+            Some(_) => {}
         }
         let start_epoch_secs = ticks_before
             .parse::<u64>()

@@ -46,7 +46,9 @@ fn argmax() -> io::Result<usize> {
 /// (`EPERM`/`ESRCH`/…); the caller distinguishes denied vs gone via `raw_os_error`.
 pub fn procargs2(pid: u32) -> io::Result<Vec<u8>> {
     let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
-    let mut size = argmax()?;
+    // +sizeof(int): the kernel prepends argc to the copied args block, so a payload at exactly
+    // ARG_MAX would truncate in a bare ARG_MAX buffer.
+    let mut size = argmax()? + std::mem::size_of::<libc::c_int>();
     let mut buf = vec![0u8; size];
     // SAFETY: `buf` is `size` bytes and outlives the call; the kernel writes at most `size`
     // bytes and updates `size` to the written length.
@@ -65,6 +67,14 @@ pub fn procargs2(pid: u32) -> io::Result<Vec<u8>> {
     }
     buf.truncate(size);
     Ok(buf)
+}
+
+/// The effective uid of this process — `geteuid` cannot fail. Here because the main crate
+/// forbids unsafe and a `$HOME`-metadata proxy is spoofable (an attacker-set `HOME` could
+/// point uid-scoping at someone else's files).
+pub fn euid() -> u32 {
+    // SAFETY: geteuid takes no arguments, touches no memory, and always succeeds.
+    unsafe { libc::geteuid() }
 }
 
 // --- fd1 pty path: proc_pidfdinfo(PROC_PIDFDVNODEPATHINFO) ---------------------------------

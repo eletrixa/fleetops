@@ -367,6 +367,51 @@ mod tests {
         );
     }
 
+    /// Trait-level fake: every snapshot reports a PID-reuse race.
+    struct RacingProc;
+    impl crate::platform::ProcFacts for RacingProc {
+        fn pids(&self) -> Vec<u32> {
+            Vec::new()
+        }
+        fn comm(&self, _pid: u32) -> Option<String> {
+            None
+        }
+        fn snapshot(&self, _pid: u32) -> crate::platform::SnapshotOutcome {
+            crate::platform::SnapshotOutcome::Raced
+        }
+        fn liveness(&self, _s: &crate::platform::StartId, _f: &str) -> Liveness {
+            Liveness::Match
+        }
+        fn pty_prefix(&self) -> &'static str {
+            "/dev/pts/"
+        }
+    }
+
+    #[test]
+    fn raced_snapshot_is_stale_and_counted_gone_is_stale_and_not() {
+        let tmp = std::env::temp_dir().join(format!("fleet-race-{}", std::process::id()));
+        let sessions = tmp.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(sessions.join("9.json"), session_json(9, "900", "busy")).unwrap();
+
+        // Raced: dropped as stale AND surfaced as a drift signal.
+        let (live, stats, platform) = scan(&sessions, &RacingProc);
+        assert!(live.is_empty());
+        assert_eq!(stats.stale_dead, 1);
+        assert_eq!(platform.identity_raced, 1, "a race is a drift signal");
+
+        // Gone (no proc entry at all): stale, but NOT a race — normal exits must never
+        // inflate the identity_raced counter.
+        let proc_root = tmp.join("proc");
+        std::fs::create_dir_all(&proc_root).unwrap();
+        let proc = crate::platform::LinuxProc::new(proc_root);
+        let (live, stats, platform) = scan(&sessions, &proc);
+        std::fs::remove_dir_all(&tmp).ok();
+        assert!(live.is_empty());
+        assert_eq!(stats.stale_dead, 1);
+        assert_eq!(platform.identity_raced, 0);
+    }
+
     #[test]
     fn scan_of_missing_dir_is_flagged_not_a_silent_empty_fleet() {
         let proc = crate::platform::LinuxProc::new(std::path::PathBuf::from("/nonexistent-proc"));

@@ -395,10 +395,9 @@ pub async fn discover_sockets(
                 dirs.push(default_dir);
             }
         }
-        // Own uid via the home dir's owner — the crate forbids unsafe, so no geteuid().
-        let own_uid = std::env::var_os("HOME")
-            .and_then(|h| std::fs::metadata(h).ok())
-            .map(|m| std::os::unix::fs::MetadataExt::uid(&m));
+        // Real effective uid (via the FFI sub-crate) — a `$HOME`-metadata proxy would let a
+        // spoofed HOME point uid-scoping at another user's sockets.
+        let own_uid = Some(fleetops_procargs::euid());
         let proc = crate::platform::provider();
         let gui_pids: std::collections::HashSet<u32> = proc
             .pids()
@@ -643,6 +642,11 @@ pub fn pick_focused_pane_id(clients: &[(u64, u64)]) -> Option<u64> {
 pub async fn focused_pane_id(runner: &dyn Runner) -> Option<u64> {
     let (sockets, _stats) = discover_sockets(runner).await.unwrap_or_default();
     let sockets = if sockets.is_empty() {
+        // Same gate as `list_all_panes`: with no live wezterm at all, a socketless cli call
+        // only trips over stale gui-sock files (timeout/noise).
+        if !own_instance_worth_querying() {
+            return None;
+        }
         vec![String::new()]
     } else {
         sockets
