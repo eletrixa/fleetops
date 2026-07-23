@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- **Dependency bump: ratatui 0.30, crossterm 0.29, tokio 1.53** — resolves the Dependabot
+  alert on `lru` (GHSA — `IterMut` unsound under Stacked Borrows, patched in lru 0.16.3);
+  the crate now resolves to lru 0.18.1 via ratatui-core, with a single crossterm/ratatui
+  copy each. CI's `actions/checkout` also bumped to `@v7` alongside.
+
 - **Session marker emoji in the SESSION column** — every row now opens with a deterministic
   per-session emoji (same 24-glyph set + hash formula as the LCARS statusline's line-1 marker),
   so a session is findable at a glance across the board, the statusline, and wezterm tabs.
