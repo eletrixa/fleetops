@@ -20,8 +20,8 @@ Codex lane, wezterm jump, and pane highlight — with Linux/WSL2 behavior unchan
   file epoch vs `ps lstart` epoch delta = **0 for all 13**. `procStart` is the kernel start
   second, rendered as UTC ctime. Exact-equality liveness confirmed viable.
 - (P2) `KERN_PROCARGS2` on live claude (node) processes: env fully readable (96 vars), no
-  cs_restricted omission. Codex processes also readable. The `env_permission_denied`
-  diagnostic stays (other machines / hardened runtimes may differ).
+  cs_restricted omission. Codex processes also readable. The `env_unavailable` diagnostic
+  stays (other machines / hardened runtimes may differ).
 - Side finding: dev machine's terminal is ghostty, not wezterm — the pane lane will be
   legitimately empty here; wezterm-lane tests rely on fixtures + a wezterm install for live
   verify. (A ghostty lane is a non-goal.)
@@ -119,9 +119,11 @@ looks like an env assignment (must stay argv).
 ### procStart comparison (macOS)
 
 - Parse `"%a %b %e %H:%M:%S %Y"` with chrono as **UTC** → epoch seconds.
-- Liveness: **exact equality** with `start_epoch_secs`. No tolerance — ±1s would accept a
-  recycled PID started in an adjacent second and silently weaken the PID-reuse invariant
-  (`discovery.rs:217-223`). Gate: probe P1 must confirm exact match first.
+- Liveness: **exact equality** of the parsed file second against `StartId::Mac.tvsec` (the
+  lossless identity's seconds component — NOT `start_epoch_secs`, which is Codex-age-only per
+  §ProcSnapshot). No tolerance — ±1s would accept a recycled PID started in an adjacent second
+  and silently weaken the PID-reuse invariant (`discovery.rs:217-223`). Gate: probe P1
+  confirmed exact match.
 - **Near-miss drift counter**: `0 < |delta| ≤ 2s` increments a doctor-visible
   `start_mismatch_near` stat — catches both a future Claude change to "observed time" and a
   future TZ semantic change (UTC→local parses fine but shifts hours; that lands in plain
@@ -201,10 +203,15 @@ pub struct PaneDiscoveryStats {
 }
 ```
 
-Route: `discovery::scan`/`codex::scan` return `PlatformStats` alongside their existing results;
-pane discovery returns `PaneDiscoveryStats` next to its `Vec<String>`; `Collected`
-(`collect.rs:29-39`) grows both fields next to `ScanStats` + `lane_error`; doctor and the board
-footer read them from `Collected` — one path, both consumers, `snapshot` JSON includes them.
+Route, named end-to-end: `discovery::scan` and `codex::scan` each return `PlatformStats`
+alongside their existing results; the two are **summed** before storage. On the pane side,
+`list_all_panes` returns `PaneDiscoveryStats` next to its pane list (socket found/stale/
+foreign-uid tallies from discovery), `merge_instance_results` increments `instances_failed`
+as it folds per-instance errors (`panes.rs:331-390`), and `collect`'s `panes_result` argument
+(`collect.rs:42-48`) carries the stats through. `Collected` (`collect.rs:29-39`) grows
+`platform_stats: PlatformStats` (the sum) and `pane_stats: PaneDiscoveryStats` next to
+`ScanStats` + `lane_error`; doctor and the board footer read them from `Collected` — one path,
+both consumers, `snapshot` JSON includes them.
 
 Per-platform checks, each with a distinct signal:
 
@@ -264,7 +271,7 @@ Main crate `unsafe_code = "forbid"` unchanged; the sub-crate carries
 2. **KERN_PROCARGS2 env omission** (cs_restricted) loses `CLAUDE_ACCOUNT` **and**
    `WEZTERM_PANE` — degrades account attribution AND exact pane identity/highlight for the
    affected session (falls back to title/cwd pane matching, as designed for pre-forwarding
-   sessions). Probe P2 + `env_permission_denied` diagnostic make it visible, never silent.
+   sessions). Probe P2 + `env_unavailable` diagnostic make it visible, never silent.
 3. **KERN_PROCARGS2 truncation** — buffer at `KERN_ARGMAX`; decoder treats truncated env region
    as `Absent`-with-diagnostic, never mis-parses.
 4. **libproc fd→vnode awkwardness** — primary path is in-process libproc (synchronous, fits
