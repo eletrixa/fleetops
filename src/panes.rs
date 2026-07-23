@@ -467,6 +467,12 @@ pub async fn list_all_panes(
 ) -> AppResult<(Vec<PaneRow>, Option<String>, PaneDiscoveryStats)> {
     let (sockets, mut stats) = discover_sockets(runner).await?;
     if sockets.is_empty() {
+        if !own_instance_worth_querying() {
+            // No live wezterm at all (macOS: no wezterm-gui process, not inside wezterm).
+            // A socketless `cli` call would only surface wezterm's OWN discovery tripping
+            // over stale gui-sock files — a legitimately empty lane, not an error.
+            return Ok((Vec::new(), None, stats));
+        }
         // No instance discovered — fall back to the invoker's own instance.
         return Ok((list_panes(runner, "").await?, None, stats));
     }
@@ -474,6 +480,28 @@ pub async fn list_all_panes(
     let (rows, first_err) =
         merge_instance_results(futures::future::join_all(queries).await, &mut stats)?;
     Ok((rows, first_err, stats))
+}
+
+/// Is the own-instance (`""` socket) fallback worth a wezterm call? On macOS the discovery
+/// already enumerated `wezterm-gui` processes in-process — zero live pids and no
+/// `$WEZTERM_UNIX_SOCKET` means there is nothing to talk to. On WSL2 the answer is always
+/// yes: tasklist can miss instances, and the interop call is the only probe there.
+#[cfg(target_os = "macos")]
+fn own_instance_worth_querying() -> bool {
+    use crate::platform::ProcFacts;
+    if std::env::var_os("WEZTERM_UNIX_SOCKET").is_some_and(|s| !s.is_empty()) {
+        return true; // running inside wezterm — its own socket answers
+    }
+    let proc = crate::platform::provider();
+    proc.pids()
+        .into_iter()
+        .any(|pid| proc.comm(pid).is_some_and(|c| c == "wezterm-gui"))
+}
+
+/// See the macOS variant — the WSL2 interop probe is always attempted.
+#[cfg(not(target_os = "macos"))]
+const fn own_instance_worth_querying() -> bool {
+    true
 }
 
 /// Merge per-instance results: rows from every healthy instance + the first failure (if any);
