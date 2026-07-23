@@ -1,6 +1,7 @@
 target/
 docs/ops/
-.claude/
+.claude/*
+!.claude/commands/
 *.db
 *.db-wal
 *.db-shm

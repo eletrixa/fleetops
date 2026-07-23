@@ -57,6 +57,10 @@ cargo build --release
 Requires a recent stable Rust toolchain (see `rust-toolchain.toml`) and, for the pane lane, wezterm
 installed on the Windows side (`wezterm.exe` reachable from WSL).
 
+**Using Claude Code?** Run `claude` in the repo and type `/setup` — a checked-in command
+(`.claude/commands/setup.md`) walks Claude through checking your platform, building, installing
+onto PATH, detecting which lanes your machine supports, and interpreting `fleet doctor`.
+
 ## Quick start
 
 ```bash

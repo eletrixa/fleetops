@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- **`/setup` command for Claude Code** — a checked-in `.claude/commands/setup.md` so anyone
+  cloning the repo can run `claude` and type `/setup`: guided platform check, build, PATH
+  install, per-lane environment detection (sessions dir, Codex, wezterm, `FLEET_*_DIR`
+  overrides, optional WSLENV pane forwarding), and a walked-through `fleet doctor`. README
+  points to it from Install.
+
 - **Dependency bump: ratatui 0.30, crossterm 0.29, tokio 1.53** — resolves the Dependabot
   alert on `lru` (GHSA — `IterMut` unsound under Stacked Borrows, patched in lru 0.16.3);
   the crate now resolves to lru 0.18.1 via ratatui-core, with a single crossterm/ratatui
