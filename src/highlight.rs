@@ -108,10 +108,11 @@ pub const fn osc_reset() -> &'static [u8] {
 
 // --- writer: detached, best-effort OSC pane-tint writes (spec 006) ------------------------
 
-// Linux asm-generic fcntl flag values (octal) — avoids a `libc` dependency for two constants;
-// this crate is WSL2/Linux-only by design (spec 006: no new dependency for the writer).
-const O_NOCTTY: i32 = 0o400;
-const O_NONBLOCK: i32 = 0o4000;
+// Per-target fcntl flag values via libc (wave 7): the old hardcoded Linux octals (0o400/0o4000)
+// are WRONG on Darwin (O_NOCTTY=0x20000, O_NONBLOCK=0x4) — opening a pty with bad flags could
+// block or steal the controlling terminal.
+const O_NOCTTY: i32 = libc::O_NOCTTY;
+const O_NONBLOCK: i32 = libc::O_NONBLOCK;
 
 /// Delay between `Pulse` frames — six frames alternate bright/dim green over ~1 s (spec 006).
 const PULSE_FRAME_INTERVAL: Duration = Duration::from_millis(160);

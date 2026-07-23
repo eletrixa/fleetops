@@ -17,12 +17,11 @@
 //! - The caches are borrowed for the whole call; the TUI passes its persistent ones (held under
 //!   the sweep mutex), the snapshot passes fresh ones. Read-only over the fleet.
 
-use std::path::Path;
-
 use crate::board::{self, SessionRow};
 use crate::discovery::{self, ScanStats};
 use crate::error::AppResult;
 use crate::panes::{PaneCache, PaneRow};
+use crate::platform::{self, PaneDiscoveryStats, PlatformStats};
 use crate::telemetry::{TailCache, Telemetry};
 use crate::{codex, paths};
 
@@ -33,6 +32,10 @@ pub struct Collected {
     pub rows: Vec<SessionRow>,
     /// Discovery tallies (footer + doctor + snapshot exit code).
     pub stats: ScanStats,
+    /// Platform fact-acquisition tallies, Claude + Codex scans summed (doctor + snapshot).
+    pub platform_stats: PlatformStats,
+    /// wezterm socket-discovery tallies from this pass's pane fetch.
+    pub pane_stats: PaneDiscoveryStats,
     /// A degraded lane (e.g. wezterm unreachable) — rows are still valid.
     pub lane_error: Option<String>,
     /// Live Codex rows folded into `rows` this pass (footer `· N codex`).
@@ -44,10 +47,12 @@ pub struct Collected {
 pub fn collect(
     tails: &mut TailCache,
     pane_cache: &mut PaneCache,
-    panes_result: AppResult<(Vec<PaneRow>, Option<String>)>,
+    panes_result: AppResult<(Vec<PaneRow>, Option<String>, PaneDiscoveryStats)>,
 ) -> Collected {
     let claude_dir = paths::claude_dir();
-    let (sessions, stats) = discovery::scan(&claude_dir.join("sessions"), Path::new("/proc"));
+    let proc = platform::provider();
+    let (sessions, stats, mut platform_stats) =
+        discovery::scan(&claude_dir.join("sessions"), &proc);
     let projects = claude_dir.join("projects");
     let telemetry: Vec<Telemetry> = sessions
         .iter()
@@ -58,15 +63,23 @@ pub fn collect(
         .map(|s| s.file.session_id.as_str())
         .collect();
     tails.retain(&live_ids);
-    let (pane_rows, lane_error) = pane_cache.fold(panes_result);
+    // Split the discovery tallies off before the cache fold (fold's contract is rows+note).
+    let (panes_folded, pane_stats) = match panes_result {
+        Ok((rows, err, stats)) => (Ok((rows, err)), stats),
+        Err(e) => (Err(e), PaneDiscoveryStats::default()),
+    };
+    let (pane_rows, lane_error) = pane_cache.fold(panes_folded);
     let mut rows = board::assemble(&sessions, &telemetry, &pane_rows);
-    let codex_rows = codex::scan(&paths::codex_dir(), Path::new("/proc"), &pane_rows);
+    let (codex_rows, codex_platform) = codex::scan(&paths::codex_dir(), &proc, &pane_rows);
+    platform_stats.absorb(&codex_platform);
     let codex_count = codex_rows.len();
     rows.extend(codex_rows);
     board::sort_rows(&mut rows);
     Collected {
         rows,
         stats,
+        platform_stats,
+        pane_stats,
         lane_error,
         codex_count,
     }

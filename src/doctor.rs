@@ -17,6 +17,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::discovery::{self, NativeStatus, ScanStats};
+use crate::platform::{self, PlatformStats};
 use crate::runner::Runner;
 use crate::telemetry::TailCache;
 use crate::{board, panes, paths};
@@ -26,6 +27,10 @@ use crate::{board, panes, paths};
 pub struct DoctorFacts {
     /// Discovery tallies.
     pub scan: ScanStats,
+    /// Platform fact-acquisition tallies (liveness drift, env/fd acquisition failures).
+    pub platform: PlatformStats,
+    /// wezterm socket-discovery tallies (stale/foreign-uid sockets, failing instances).
+    pub pane_stats: crate::platform::PaneDiscoveryStats,
     /// Unknown native status strings seen (drift signal).
     pub unknown_statuses: BTreeSet<String>,
     /// CC versions present in live session files.
@@ -40,7 +45,8 @@ pub struct DoctorFacts {
     pub wezterm: Result<usize, String>,
     /// One instance answered, another failed — the pane list is partial.
     pub instance_error: Option<String>,
-    /// `/proc` is absent — fleetops targets WSL2/Linux; session discovery needs `/proc`.
+    /// The platform's process-facts source is absent (`/proc` on Linux; never on macOS, where
+    /// libproc is part of the OS).
     pub proc_missing: bool,
 }
 
@@ -48,6 +54,8 @@ impl Default for DoctorFacts {
     fn default() -> Self {
         Self {
             scan: ScanStats::default(),
+            platform: PlatformStats::default(),
+            pane_stats: crate::platform::PaneDiscoveryStats::default(),
             unknown_statuses: BTreeSet::new(),
             versions: BTreeSet::new(),
             sessions: Vec::new(),
@@ -67,7 +75,8 @@ pub fn render_report(facts: &DoctorFacts) -> String {
     out.push_str("fleet doctor — read-only drift report\n\n");
     if facts.proc_missing {
         out.push_str(
-            "  ⚠ /proc not found — fleetops targets WSL2/Linux; the board is empty here\n",
+            "  ⚠ /proc not found — this build discovers sessions via /proc (WSL2/Linux); \
+             the board is empty here\n",
         );
     }
     let _ = writeln!(
@@ -81,6 +90,7 @@ pub fn render_report(facts: &DoctorFacts) -> String {
     if facts.scan.parse_failed > 0 {
         out.push_str("  ⚠ parse failures — sessions/<pid>.json format may have drifted (A1)\n");
     }
+    render_platform_drift(&mut out, &facts.platform);
     if facts.unknown_statuses.is_empty() {
         out.push_str("native statuses: all known (busy/idle/shell/waiting)\n");
     } else {
@@ -128,6 +138,13 @@ pub fn render_report(facts: &DoctorFacts) -> String {
             "  ⚠ instance degraded: {e} — pane list is PARTIAL, counts above undercount"
         );
     }
+    if facts.pane_stats.sockets_stale + facts.pane_stats.sockets_foreign_uid > 0 {
+        let _ = writeln!(
+            out,
+            "sockets skipped: {} stale (dead instance — would hang) · {} foreign-uid",
+            facts.pane_stats.sockets_stale, facts.pane_stats.sockets_foreign_uid
+        );
+    }
     let _ = writeln!(out, "\nlive sessions ({}):", facts.sessions.len());
     for (name, transcript, account, pane) in &facts.sessions {
         let mark = |b: bool| if b { "✓" } else { "✗" };
@@ -142,26 +159,86 @@ pub fn render_report(facts: &DoctorFacts) -> String {
     out
 }
 
+/// The platform-acquisition drift block of the report (pure; split out of `render_report`).
+fn render_platform_drift(out: &mut String, platform: &PlatformStats) {
+    use std::fmt::Write;
+    if platform.date_parse_failed > 0 {
+        let _ = writeln!(
+            out,
+            "  ⚠ procStart date-parse failures: {} — the procStart format may have drifted",
+            platform.date_parse_failed
+        );
+    }
+    if platform.start_mismatch > 0 {
+        let _ = writeln!(
+            out,
+            "  ⚠ start-identity mismatches: {} ({} within 2s) — PID reuse is normal, but \
+             many near-misses suggest procStart semantics drifted (TZ/derivation)",
+            platform.start_mismatch, platform.start_mismatch_near
+        );
+    }
+    if platform.identity_raced > 0 {
+        let _ = writeln!(
+            out,
+            "  ⚠ snapshots discarded to PID-reuse races: {}",
+            platform.identity_raced
+        );
+    }
+    if platform.env_denied + platform.env_unavailable + platform.env_malformed > 0 {
+        let _ = writeln!(
+            out,
+            "  ⚠ env acquisition: {} denied · {} unavailable (possibly restricted) · {} \
+             malformed — account/pane attribution degraded for those sessions",
+            platform.env_denied, platform.env_unavailable, platform.env_malformed
+        );
+    }
+    if platform.fd1_denied > 0 {
+        let _ = writeln!(
+            out,
+            "  ⚠ fd-1 info denied for {} live processes — highlight targets missing",
+            platform.fd1_denied
+        );
+    }
+}
+
 /// Gather facts from the live system and render the report. Read-only.
 /// Returns `(report, scan_ok)` — `scan_ok == false` means the scan itself failed (exit 1).
 pub async fn run(runner: &dyn Runner) -> (String, bool) {
     let claude_dir = paths::claude_dir();
-    let instances = panes::discover_sockets(runner).await.map_or(0, |s| s.len());
-    let (wezterm, pane_list, instance_error) = match panes::list_all_panes(runner).await {
-        Ok((rows, partial)) => (Ok(rows.len()), rows, partial),
-        Err(e) => (Err(e.to_string()), Vec::new(), None),
+    let (instances, discovery_stats) = panes::discover_sockets(runner)
+        .await
+        .map_or((0, None), |(s, stats)| (s.len(), Some(stats)));
+    let (wezterm, pane_list, instance_error, pane_stats) = match panes::list_all_panes(runner).await
+    {
+        Ok((rows, partial, stats)) => (Ok(rows.len()), rows, partial, stats),
+        // The lane failed after discovery — keep discovery's tallies (they explain WHY, e.g.
+        // "1 stale socket skipped" behind a wezterm-unreachable footer).
+        Err(e) => (
+            Err(e.to_string()),
+            Vec::new(),
+            None,
+            discovery_stats.unwrap_or_default(),
+        ),
     };
 
     let facts = tokio::task::spawn_blocking(move || {
-        let (sessions, scan) = discovery::scan(&claude_dir.join("sessions"), Path::new("/proc"));
+        let proc = platform::provider();
+        let (sessions, scan, mut platform_stats) =
+            discovery::scan(&claude_dir.join("sessions"), &proc);
+        // The Codex lane acquires platform facts too — its drift belongs in this report.
+        let (_codex_rows, codex_platform) = crate::codex::scan(&paths::codex_dir(), &proc, &[]);
+        platform_stats.absorb(&codex_platform);
         let mut cache = TailCache::default();
         let projects = claude_dir.join("projects");
         let mut facts = DoctorFacts {
             scan,
+            platform: platform_stats,
+            pane_stats,
             instances,
             wezterm,
             instance_error,
-            proc_missing: !Path::new("/proc").is_dir(),
+            // macOS discovers via libproc (part of the OS); /proc only gates Linux builds.
+            proc_missing: !cfg!(target_os = "macos") && !Path::new("/proc").is_dir(),
             ..DoctorFacts::default()
         };
         for s in &sessions {
@@ -273,9 +350,32 @@ mod tests {
         };
         let report = render_report(&facts);
         assert!(
-            report.contains("/proc not found — fleetops targets WSL2/Linux"),
+            report.contains("/proc not found"),
             "missing /proc must surface a platform hint"
         );
+    }
+
+    #[test]
+    fn report_flags_platform_acquisition_drift() {
+        let facts = DoctorFacts {
+            platform: PlatformStats {
+                date_parse_failed: 1,
+                start_mismatch: 3,
+                start_mismatch_near: 2,
+                env_denied: 1,
+                env_unavailable: 1,
+                env_malformed: 0,
+                fd1_denied: 2,
+                identity_raced: 1,
+            },
+            ..DoctorFacts::default()
+        };
+        let report = render_report(&facts);
+        assert!(report.contains("procStart date-parse failures: 1"));
+        assert!(report.contains("start-identity mismatches: 3 (2 within 2s)"));
+        assert!(report.contains("1 denied · 1 unavailable"));
+        assert!(report.contains("fd-1 info denied for 2"));
+        assert!(report.contains("PID-reuse races: 1"));
     }
 
     #[test]

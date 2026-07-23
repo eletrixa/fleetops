@@ -35,17 +35,22 @@ keypress).
   undocumented sources still parseable?); `fleet snapshot` emits one JSON object of exactly what the
   board would render, for dashboards and scripts.
 
-## Platform: WSL2 only
+## Platform: WSL2 + macOS
 
-fleetops targets **WSL2 (Linux)** and does nothing useful anywhere else:
+fleetops targets **WSL2 (Linux)** and **macOS**; native Windows is not supported (the board
+comes up empty there and `fleet doctor` says why).
 
-- Session discovery reads `/proc` — absent on macOS and native Windows.
-- Pane control shells out to the Windows `wezterm.exe` across the WSL interop boundary. The
-  Windows-side wezterm socket directory is auto-detected (from `$WEZTERM_UNIX_SOCKET`, or by
-  scanning `/mnt/c/Users/*/.local/share/wezterm`) — no per-machine username configuration.
-
-On macOS or native Windows the board simply comes up empty; `fleet doctor` prints a
-`/proc not found — fleetops targets WSL2/Linux` hint.
+- **WSL2** — session discovery reads `/proc`; pane control shells out to the Windows
+  `wezterm.exe` across the WSL interop boundary. The Windows-side wezterm socket directory is
+  auto-detected (from `$WEZTERM_UNIX_SOCKET`, or by scanning
+  `/mnt/c/Users/*/.local/share/wezterm`) — no per-machine username configuration.
+- **macOS** — session discovery uses `libproc` + one `sysctl` (no `/proc` needed); liveness
+  compares the session file's `procStart` (a UTC ctime string there) against the kernel start
+  time, exactly. Pane control drives the native `wezterm` CLI; sockets are discovered from
+  `$WEZTERM_UNIX_SOCKET` plus `~/.local/share/wezterm`, filtered to live `wezterm-gui`
+  processes owned by the invoking user. Mux domains with a custom `socket_path` are not
+  discovered (documented limitation). No wezterm installed → the board still works; only the
+  jump/highlight lane sits empty.
 
 ## Install
 

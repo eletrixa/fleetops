@@ -185,6 +185,10 @@ async fn sweep(runner: &dyn Runner, cache: &Arc<Mutex<SweepCaches>>) -> Result<S
             stats: collected.stats,
             lane_error: collected.lane_error,
             codex_count: collected.codex_count,
+            drift: collected.platform_stats.total()
+                + collected.pane_stats.sockets_stale
+                + collected.pane_stats.sockets_foreign_uid
+                + collected.pane_stats.instances_failed,
         }
     })
     .await

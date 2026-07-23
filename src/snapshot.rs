@@ -27,6 +27,59 @@ use crate::{collect, panes};
 struct SnapshotJson {
     focused_pane_id: Option<u64>,
     sessions: Vec<SessionJson>,
+    /// Scan + platform acquisition tallies (wave 7 additive extension — consumers keying on
+    /// the original fields are unaffected).
+    stats: StatsJson,
+}
+
+/// Doctor-grade tallies in the snapshot (additive; drift must be scriptable too).
+#[derive(Debug, Serialize)]
+struct StatsJson {
+    total_files: usize,
+    parse_failed: usize,
+    stale_dead: usize,
+    live: usize,
+    dir_unreadable: bool,
+    date_parse_failed: usize,
+    start_mismatch: usize,
+    start_mismatch_near: usize,
+    env_denied: usize,
+    env_unavailable: usize,
+    env_malformed: usize,
+    fd1_denied: usize,
+    identity_raced: usize,
+    sockets_found: usize,
+    sockets_stale: usize,
+    sockets_foreign_uid: usize,
+    instances_failed: usize,
+}
+
+impl StatsJson {
+    const fn new(
+        scan: &crate::discovery::ScanStats,
+        platform: &crate::platform::PlatformStats,
+        panes: &crate::platform::PaneDiscoveryStats,
+    ) -> Self {
+        Self {
+            total_files: scan.total_files,
+            parse_failed: scan.parse_failed,
+            stale_dead: scan.stale_dead,
+            live: scan.live,
+            dir_unreadable: scan.dir_unreadable,
+            date_parse_failed: platform.date_parse_failed,
+            start_mismatch: platform.start_mismatch,
+            start_mismatch_near: platform.start_mismatch_near,
+            env_denied: platform.env_denied,
+            env_unavailable: platform.env_unavailable,
+            env_malformed: platform.env_malformed,
+            fd1_denied: platform.fd1_denied,
+            identity_raced: platform.identity_raced,
+            sockets_found: panes.sockets_found,
+            sockets_stale: panes.sockets_stale,
+            sockets_foreign_uid: panes.sockets_foreign_uid,
+            instances_failed: panes.instances_failed,
+        }
+    }
 }
 
 /// One session row in the snapshot contract.
@@ -48,8 +101,8 @@ struct SessionJson {
     session_id: String,
 }
 
-/// Render the contract JSON from the focused pane + the assembled rows (pure).
-fn render_json(focused_pane_id: Option<u64>, rows: &[SessionRow]) -> String {
+/// Render the contract JSON from the focused pane + the assembled rows + tallies (pure).
+fn render_json(focused_pane_id: Option<u64>, rows: &[SessionRow], stats: StatsJson) -> String {
     let sessions = rows
         .iter()
         .enumerate()
@@ -70,6 +123,7 @@ fn render_json(focused_pane_id: Option<u64>, rows: &[SessionRow]) -> String {
     serde_json::to_string_pretty(&SnapshotJson {
         focused_pane_id,
         sessions,
+        stats,
     })
     .unwrap_or_else(|_| "{}".to_string())
 }
@@ -92,7 +146,12 @@ pub async fn run(runner: &dyn Runner) -> (String, bool) {
     match collected {
         Ok(collected) => {
             let scan_ok = !collected.stats.dir_unreadable;
-            (render_json(focused, &collected.rows), scan_ok)
+            let stats = StatsJson::new(
+                &collected.stats,
+                &collected.platform_stats,
+                &collected.pane_stats,
+            );
+            (render_json(focused, &collected.rows, stats), scan_ok)
         }
         // A crashed scan task must not render as a clean, empty snapshot with exit 0.
         Err(e) => (
@@ -168,10 +227,12 @@ mod tests {
             ),
             unmatched_row("s2", Status::Working, "young session"),
         ];
-        let json = render_json(Some(21), &rows);
+        let json = render_json(Some(21), &rows, test_stats());
         let v: Value = serde_json::from_str(&json).expect("valid JSON");
 
         assert_eq!(v["focused_pane_id"], 21);
+        assert_eq!(v["stats"]["live"], 2, "tallies ride along (wave 7)");
+        assert_eq!(v["stats"]["start_mismatch"], 1);
         let s = &v["sessions"];
         assert_eq!(s.as_array().expect("array").len(), 2);
 
@@ -202,9 +263,26 @@ mod tests {
 
     #[test]
     fn render_json_zero_sessions_and_no_focused_pane_is_valid() {
-        let json = render_json(None, &[]);
+        let json = render_json(None, &[], test_stats());
         let v: Value = serde_json::from_str(&json).expect("valid JSON");
         assert!(v["focused_pane_id"].is_null());
         assert_eq!(v["sessions"].as_array().expect("array").len(), 0);
+    }
+
+    fn test_stats() -> StatsJson {
+        let scan = crate::discovery::ScanStats {
+            total_files: 3,
+            live: 2,
+            ..crate::discovery::ScanStats::default()
+        };
+        let platform = crate::platform::PlatformStats {
+            start_mismatch: 1,
+            ..crate::platform::PlatformStats::default()
+        };
+        StatsJson::new(
+            &scan,
+            &platform,
+            &crate::platform::PaneDiscoveryStats::default(),
+        )
     }
 }
