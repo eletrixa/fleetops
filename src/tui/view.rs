@@ -111,6 +111,37 @@ fn dir_badge(dir: &str) -> (char, Color) {
     (emoji, color)
 }
 
+/// Deterministic per-session marker emoji — mirror of `sessionEmoji` in
+/// `~/.claude/helpers/statusline-lcars.mjs` (h = h*31 + code over the id, u32
+/// wrap, mod set length; ids are ASCII so JS UTF-16 units == Rust chars). Keep
+/// set and order in lockstep with the statusline, or the same session shows
+/// different markers across surfaces.
+fn session_marker(id: &str) -> char {
+    const EMOJI: [char; 24] = [
+        '🦊', '🐙', '🦉', '🐢', '🐝', '🦈', '🐋', '🦜', '🐞', '🦕', '🍄', '🌵', '🍒', '🍋', '🥝',
+        '🍩', '🎲', '🎯', '🚀', '🔮', '🧲', '🌋', '🪐', '🛸',
+    ];
+    if id.is_empty() {
+        return '🎲';
+    }
+    let mut h: u32 = 0;
+    for c in id.chars() {
+        h = h.wrapping_mul(31).wrapping_add(u32::from(c));
+    }
+    EMOJI[usize::try_from(h % 24).unwrap_or(0)]
+}
+
+/// SESSION cell: the session's marker emoji + name. Names that already open
+/// with an emoji (astral char — e.g. renamed via the `/rename 🎯 …` convention)
+/// are shown as-is so the marker isn't doubled.
+fn session_cell(r: &SessionRow) -> String {
+    if r.name.chars().next().is_some_and(|c| u32::from(c) > 0xFFFF) {
+        r.name.clone()
+    } else {
+        format!("{} {}", session_marker(&r.session_id), r.name)
+    }
+}
+
 fn pane_cell(row: &SessionRow) -> String {
     match (&row.pane, row.pane_ambiguous) {
         (Some(p), _) => p.pane_id.to_string(),
@@ -191,7 +222,7 @@ fn render_table(f: &mut Frame<'_>, area: Rect, app: &App) {
             Cell::from((i + 1).to_string()),
             Cell::from(label).style(style),
             Cell::from(format!("{dir_emoji} {dir}")).style(Style::default().fg(dir_color)),
-            Cell::from(r.name.clone()),
+            Cell::from(session_cell(r)),
             ctx_cell,
             Cell::from(tok),
             Cell::from(account).style(account_style),
@@ -437,6 +468,23 @@ mod tests {
         let app = App::default();
         let screen = rendered(&app);
         assert!(screen.contains("fleet — 0 sessions"));
+    }
+
+    #[test]
+    fn session_marker_is_stable_and_matches_statusline_vector() {
+        assert_eq!(session_marker("x"), session_marker("x"));
+        // known vector: statusline-lcars.mjs renders 🎯 for this id (live-verified)
+        assert_eq!(session_marker("eb2db80b-9717-4df8-8c58-2e322711d6b3"), '🎯');
+    }
+
+    #[test]
+    fn session_cell_prefixes_marker_unless_name_already_has_emoji() {
+        let plain = row("a", Status::Working, "young session", None);
+        assert!(session_cell(&plain).starts_with(session_marker("a")));
+        assert!(session_cell(&plain).ends_with(" young session"));
+        let mut named = row("a", Status::Working, "x", None);
+        named.name = "🦊 named".to_string();
+        assert_eq!(session_cell(&named), "🦊 named");
     }
 
     #[test]

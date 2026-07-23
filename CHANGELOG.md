@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- **Session marker emoji in the SESSION column** — every row now opens with a deterministic
+  per-session emoji (same 24-glyph set + hash formula as the LCARS statusline's line-1 marker),
+  so a session is findable at a glance across the board, the statusline, and wezterm tabs.
+  Names that already start with an emoji (the `/rename 🎯 …` convention) render unchanged.
+
 - **Fixed: wezterm socket dir is resolved at runtime, not a hardcoded username** — the
   release-prep scrub replaced the author's Windows username in the socket-dir constants with a
   placeholder (`user`), which pointed pane discovery at `/mnt/c/Users/user/.local/share/wezterm`
