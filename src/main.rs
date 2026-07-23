@@ -23,6 +23,7 @@ mod fold;
 mod highlight;
 mod panes;
 mod paths;
+mod platform;
 mod runner;
 mod snapshot;
 mod telemetry;

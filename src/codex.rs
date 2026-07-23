@@ -4,13 +4,13 @@
 //! Project: Fleetops — TUI monitoring all running Claude Code sessions (the fleet)
 //! Module:  src/codex.rs
 //! Deps:    serde/serde_json (rollout JSON); std::fs (via `scan`, called by the sensor's
-//!          spawn_blocking); board (SessionRow, match_pane); discovery (parse_environ,
-//!          starttime_from_stat); fold (Status, STALL_AFTER_SECS); panes (PaneRow)
-//! Tested:  inline `#[cfg(test)]` — synthetic rollout JSONL lines + tempdir fake `/proc` +
-//!          `~/.codex/sessions` tree (house pattern, see discovery.rs/telemetry.rs)
+//!          spawn_blocking); board (SessionRow, match_pane); discovery (parse_environ);
+//!          platform (ProcFacts seam); fold (Status, STALL_AFTER_SECS); panes (PaneRow)
+//! Tested:  inline `#[cfg(test)]` — synthetic rollout JSONL lines + tempdir fake proc root
+//!          (via the Linux provider) + `~/.codex/sessions` tree (house pattern)
 //!
 //! Key responsibilities:
-//! - Recognize a Codex TUI process: `comm == "codex"`, argv0-only cmdline, `fd/1 -> /dev/pts/*`
+//! - Recognize a Codex TUI process: `comm == "codex"`, argv0-only, fd 1 on a platform pty
 //!   (`is_codex_tui`) — the node shim (`comm == "node"`) and `codex exec`/`--version` are
 //!   skipped for free (comm mismatch / extra argv).
 //! - Parse a rollout's `session_meta` line 0 (`parse_session_meta`) and fold its tail
@@ -18,8 +18,8 @@
 //! - Join each live process to its newest same-cwd rollout, without sqlite (v1): a liveness
 //!   guard rejects a rollout mtime older than the process's own start minus a slack window; two
 //!   processes sharing a cwd never join (`join_rollouts` — never guess, house rule).
-//! - `scan`: the one fs-touching entry point, mirroring `discovery::scan`'s shape — walks
-//!   `proc_root` for live Codex TUIs and `codex_root/sessions/**/rollout-*.jsonl` for
+//! - `scan`: the one fs-touching entry point, mirroring `discovery::scan`'s shape — asks the
+//!   platform seam for live Codex TUIs and walks `codex_root/sessions/**/rollout-*.jsonl` for
 //!   candidates, joins them, and assembles `SessionRow`s (pane matched via `board::match_pane`).
 //!
 //! Design constraints:
@@ -41,6 +41,7 @@ use crate::board::{self, SessionRow};
 use crate::discovery;
 use crate::fold::{self, Status};
 use crate::panes::PaneRow;
+use crate::platform::{AcqResult, PlatformStats, ProcFacts, SnapshotOutcome};
 
 /// `session_meta` line 0 of a rollout — tolerant, unknown fields skipped.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,28 +184,28 @@ pub fn fold_rollout_tail(bytes: &[u8], age_secs: Option<u64>) -> RolloutFacts {
     }
 }
 
-/// A Codex TUI process: `comm == "codex"` AND argv0-only cmdline AND `fd/1 -> /dev/pts/*`. The
-/// node shim (`comm == "node"`) and `codex exec`/`codex --version` are skipped for free (comm
-/// mismatch / extra argv).
-pub fn is_codex_tui(comm: &str, cmdline: &[u8], fd1_target: Option<&str>) -> bool {
-    let argv0_only = cmdline
-        .split(|&b| b == 0)
-        .filter(|arg| !arg.is_empty())
-        .count()
-        == 1;
+/// A Codex TUI process: `comm == "codex"` AND argv0-only AND fd 1 on a pty under the platform
+/// prefix. The node shim (`comm == "node"`) and `codex exec`/`codex --version`/wrappers are
+/// skipped for free (comm mismatch / extra argv).
+pub fn is_codex_tui(
+    comm: &str,
+    argv: &[Vec<u8>],
+    fd1_target: Option<&str>,
+    pty_prefix: &str,
+) -> bool {
     comm.trim_end() == "codex"
-        && argv0_only
-        && fd1_target.is_some_and(|t| t.starts_with("/dev/pts/"))
+        && argv.iter().filter(|a| !a.is_empty()).count() == 1
+        && fd1_target.is_some_and(|t| t.starts_with(pty_prefix))
 }
 
 /// One live Codex process's already-read join facts (spec 008 discovery).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexProc {
-    /// `/proc/<pid>/cwd` readlink target.
+    /// Process working directory.
     pub cwd: String,
-    /// Wallclock seconds the process started: `btime + starttime/HZ` (the join liveness guard
-    /// baseline; `HZ` is hardcoded at 100 for this WSL2 kernel — a wrong value only
-    /// loosens the guard, degrading to newest-per-cwd).
+    /// Wallclock seconds the process started — `ProcSnapshot::start_epoch_secs` (the join
+    /// liveness guard baseline; a loose value only degrades to newest-per-cwd, never rejects
+    /// a live process).
     pub start_wallclock_secs: u64,
 }
 
@@ -253,9 +254,6 @@ const MAX_ROLLOUTS: usize = 300;
 /// codex turn can stream well over 64 KiB of `response_item` output, which would push the last
 /// `user_message` line out of a smaller window and cost the row its name.
 const TAIL_BYTES: u64 = 256 * 1024;
-/// WSL2 clock ticks/sec (HZ) — hardcoded per recon; a wrong value only loosens the join guard
-/// (degrading to newest-per-cwd), never rejects a live process.
-const HZ: u64 = 100;
 
 /// One live Codex TUI process's already-read facts (scan-internal; `CodexProc` is the pure join
 /// input derived from this).
@@ -267,12 +265,16 @@ struct ProcInfo {
     start_wallclock_secs: u64,
 }
 
-/// Scan `codex_root` for rollouts and `proc_root` for live Codex TUI processes, join them, and
+/// Scan `codex_root` for rollouts and the platform for live Codex TUI processes, join them, and
 /// return assembled `SessionRow`s — matched against `panes` via the existing `board::match_pane`
-/// (env pane id only). Blocking fs work — the sensor calls this inside `spawn_blocking`, same
-/// pattern as `discovery::scan`.
-pub fn scan(codex_root: &Path, proc_root: &Path, panes: &[PaneRow]) -> Vec<SessionRow> {
-    let proc_infos = scan_procs(proc_root);
+/// (env pane id only). Blocking fs/syscall work — the sensor calls this inside `spawn_blocking`,
+/// same pattern as `discovery::scan`.
+pub fn scan(
+    codex_root: &Path,
+    proc: &dyn ProcFacts,
+    panes: &[PaneRow],
+) -> (Vec<SessionRow>, PlatformStats) {
+    let (proc_infos, platform) = scan_procs(proc);
     let (candidates, paths_by_id) = scan_rollouts(codex_root);
     let join_procs: Vec<CodexProc> = proc_infos
         .iter()
@@ -287,74 +289,69 @@ pub fn scan(codex_root: &Path, proc_root: &Path, panes: &[PaneRow]) -> Vec<Sessi
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
 
-    proc_infos
+    let rows = proc_infos
         .iter()
         .zip(joined)
         .map(|(proc, matched)| {
             let shares_cwd = proc_infos.iter().filter(|p| p.cwd == proc.cwd).count() > 1;
             build_row(now_secs, proc, matched, &paths_by_id, shares_cwd, panes)
         })
-        .collect()
+        .collect();
+    (rows, platform)
 }
 
-/// Walk `proc_root` for live Codex TUI processes (comm/cmdline/fd1 gate via `is_codex_tui`).
-fn scan_procs(proc_root: &Path) -> Vec<ProcInfo> {
-    let btime = read_btime(proc_root);
-    let Ok(entries) = std::fs::read_dir(proc_root) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
-            read_proc_info(proc_root, pid, btime)
+/// Enumerate live Codex TUI processes through the platform seam. The cheap `comm` pre-gate
+/// keeps the full (env/argv/fd) snapshot off the hot path for the hundreds of non-codex
+/// processes a real system carries.
+fn scan_procs(proc: &dyn ProcFacts) -> (Vec<ProcInfo>, PlatformStats) {
+    let mut platform = PlatformStats::default();
+    let infos = proc
+        .pids()
+        .into_iter()
+        .filter(|&pid| proc.comm(pid).is_some_and(|c| c == "codex"))
+        .filter_map(|pid| {
+            let snap = match proc.snapshot(pid) {
+                SnapshotOutcome::Gone => return None,
+                SnapshotOutcome::Raced => {
+                    platform.identity_raced += 1;
+                    return None;
+                }
+                SnapshotOutcome::Present(snap) => snap,
+            };
+            let fd1_pty = match &snap.fd1_pty {
+                AcqResult::Ok(t) => t.clone(),
+                AcqResult::Denied => {
+                    platform.fd1_denied += 1;
+                    None
+                }
+                _ => None,
+            };
+            let argv = snap.argv.as_ref().ok().cloned().unwrap_or_default();
+            if !is_codex_tui(
+                snap.comm.as_deref().unwrap_or_default(),
+                &argv,
+                fd1_pty.as_deref(),
+                proc.pty_prefix(),
+            ) {
+                return None;
+            }
+            platform.count_env(&snap.env_block);
+            let environ = snap
+                .env_block
+                .as_ref()
+                .ok()
+                .map(|b| discovery::parse_environ(b))
+                .unwrap_or_default();
+            Some(ProcInfo {
+                pid,
+                cwd: snap.cwd.clone()?,
+                pts: fd1_pty,
+                wezterm_pane: environ.wezterm_pane,
+                start_wallclock_secs: snap.start_epoch_secs,
+            })
         })
-        .collect()
-}
-
-/// `btime` (boot time, epoch secs) from `<proc_root>/stat` — missing/unreadable degrades to 0,
-/// which only loosens the join liveness guard (spec 008), never rejects a live process.
-fn read_btime(proc_root: &Path) -> u64 {
-    std::fs::read_to_string(proc_root.join("stat"))
-        .ok()
-        .and_then(|content| {
-            content
-                .lines()
-                .find_map(|l| l.strip_prefix("btime "))
-                .and_then(|v| v.trim().parse().ok())
-        })
-        .unwrap_or(0)
-}
-
-/// Read one `/proc/<pid>`'s facts; `None` unless it passes the `is_codex_tui` gate.
-fn read_proc_info(proc_root: &Path, pid: u32, btime: u64) -> Option<ProcInfo> {
-    let dir = proc_root.join(pid.to_string());
-    let comm = std::fs::read_to_string(dir.join("comm")).ok()?;
-    let cmdline = std::fs::read(dir.join("cmdline")).ok()?;
-    let fd1_target = std::fs::read_link(dir.join("fd").join("1"))
-        .ok()
-        .and_then(|t| t.to_str().map(str::to_string));
-    if !is_codex_tui(&comm, &cmdline, fd1_target.as_deref()) {
-        return None;
-    }
-    let cwd = std::fs::read_link(dir.join("cwd"))
-        .ok()
-        .and_then(|t| t.to_str().map(str::to_string))?;
-    let stat = std::fs::read_to_string(dir.join("stat")).ok()?;
-    let starttime_ticks: u64 = discovery::starttime_from_stat(&stat)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    let environ = std::fs::read(dir.join("environ"))
-        .ok()
-        .map(|b| discovery::parse_environ(&b))
-        .unwrap_or_default();
-    Some(ProcInfo {
-        pid,
-        cwd,
-        pts: fd1_target,
-        wezterm_pane: environ.wezterm_pane,
-        start_wallclock_secs: btime + starttime_ticks / HZ,
-    })
+        .collect();
+    (infos, platform)
 }
 
 /// Walk `codex_root/sessions/*/*/*/rollout-*.jsonl`, newest-first by MTIME, capped, parsed into
@@ -525,28 +522,62 @@ mod tests {
 
     // --- is_codex_tui ---
 
+    fn argv(args: &[&str]) -> Vec<Vec<u8>> {
+        args.iter().map(|a| a.as_bytes().to_vec()).collect()
+    }
+
     #[test]
     fn is_codex_tui_table() {
-        let cases: &[(&str, &[u8], Option<&str>, bool)] = &[
+        let cases: &[(&str, &[&str], Option<&str>, bool)] = &[
             // the interactive TUI: comm codex, argv0 only, real pts
-            ("codex\n", b"codex\0", Some("/dev/pts/4"), true),
+            ("codex\n", &["codex"], Some("/dev/pts/4"), true),
             // `codex exec <prompt>` — extra argv, transient, must be skipped
-            ("codex\n", b"codex\0exec\0", Some("/dev/pts/4"), false),
+            ("codex\n", &["codex", "exec"], Some("/dev/pts/4"), false),
             // `codex --version` — extra argv, transient, must be skipped
-            ("codex\n", b"codex\0--version\0", Some("/dev/pts/4"), false),
+            (
+                "codex\n",
+                &["codex", "--version"],
+                Some("/dev/pts/4"),
+                false,
+            ),
             // the node shim wrapping codex — comm mismatch, skipped for free
-            ("node\n", b"codex\0", Some("/dev/pts/4"), false),
+            ("node\n", &["codex"], Some("/dev/pts/4"), false),
             // fd/1 not a pty (e.g. redirected to a file) — never a TUI target
-            ("codex\n", b"codex\0", Some("/dev/null"), false),
-            ("codex\n", b"codex\0", None, false),
+            ("codex\n", &["codex"], Some("/dev/null"), false),
+            ("codex\n", &["codex"], None, false),
         ];
-        for (comm, cmdline, fd1, want) in cases {
+        for (comm, args, fd1, want) in cases {
             assert_eq!(
-                is_codex_tui(comm, cmdline, *fd1),
+                is_codex_tui(comm, &argv(args), *fd1, "/dev/pts/"),
                 *want,
-                "comm={comm:?} cmdline={cmdline:?} fd1={fd1:?}"
+                "comm={comm:?} argv={args:?} fd1={fd1:?}"
             );
         }
+    }
+
+    #[test]
+    fn is_codex_tui_macos_shapes() {
+        // pbi_comm has no trailing newline and the pty prefix differs.
+        assert!(is_codex_tui(
+            "codex",
+            &argv(&["codex"]),
+            Some("/dev/ttys004"),
+            "/dev/ttys"
+        ));
+        // A Linux-style pts path never passes the macOS prefix (and vice versa).
+        assert!(!is_codex_tui(
+            "codex",
+            &argv(&["codex"]),
+            Some("/dev/pts/4"),
+            "/dev/ttys"
+        ));
+        // `codex exec` rejected on macOS exactly as on Linux.
+        assert!(!is_codex_tui(
+            "codex",
+            &argv(&["codex", "exec"]),
+            Some("/dev/ttys004"),
+            "/dev/ttys"
+        ));
     }
 
     // --- parse_session_meta ---
@@ -821,7 +852,8 @@ mod tests {
             is_active: false,
         }];
 
-        let rows = scan(&codex_root, &proc_root, &panes);
+        let proc = crate::platform::LinuxProc::new(proc_root);
+        let (rows, _platform) = scan(&codex_root, &proc, &panes);
         std::fs::remove_dir_all(&tmp).ok();
 
         assert_eq!(rows.len(), 1, "one codex TUI process, one row");
@@ -894,7 +926,8 @@ mod tests {
         std::fs::create_dir_all(&real_cwd).unwrap();
         fake_codex_proc(&proc_root, 600, &real_cwd, 0, "9");
 
-        let rows = scan(&codex_root, &proc_root, &[]);
+        let proc = crate::platform::LinuxProc::new(proc_root);
+        let (rows, _platform) = scan(&codex_root, &proc, &[]);
         std::fs::remove_dir_all(&tmp).ok();
 
         assert_eq!(

@@ -23,11 +23,16 @@
 //!   every call stays timeout-bounded.
 //! - Read-only over the fleet: the only mutating verbs are activate-tab/-pane (focus).
 
+// The WSL2 lane (tasklist, /mnt/c socket-dir resolution) stays compiled on macOS so its pure
+// helpers keep their tests on every dev machine — but it is production-dead there.
+#![cfg_attr(target_os = "macos", allow(dead_code))]
+
 use std::time::Duration;
 
 use serde::Deserialize;
 
 use crate::error::{AppError, AppResult};
+use crate::platform::PaneDiscoveryStats;
 use crate::runner::{CommandSpec, Runner};
 
 /// Status of a Claude pane, read from its title glyph.
@@ -118,11 +123,19 @@ pub fn list_clients_args() -> Vec<String> {
         .collect()
 }
 
-/// The wezterm binary as reachable from WSL2.
+/// The wezterm binary as reachable from WSL2 (Windows interop).
+#[cfg(not(target_os = "macos"))]
 pub const WEZTERM: &str = "wezterm.exe";
-/// Where the interop binary actually lives on this box — the fallback when fleet is launched
-/// with a minimal PATH (keybinding/launcher shells often lack /mnt/c/...).
+/// The native wezterm binary on macOS — no interop boundary.
+#[cfg(target_os = "macos")]
+pub const WEZTERM: &str = "wezterm";
+/// Where the binary actually lives on this box — the fallback when fleet is launched with a
+/// minimal PATH (keybinding/launcher shells often lack /mnt/c/... or /Applications shims).
+#[cfg(not(target_os = "macos"))]
 const WEZTERM_ABSOLUTE: &str = "/mnt/c/Program Files/WezTerm/wezterm.exe";
+/// The macOS app-bundle binary.
+#[cfg(target_os = "macos")]
+const WEZTERM_ABSOLUTE: &str = "/Applications/WezTerm.app/Contents/MacOS/wezterm";
 
 /// Resolve the wezterm program: plain name when PATH can find it (normal shells), the absolute
 /// install path when it can't but the file exists, else the plain name (spawn error stays
@@ -330,19 +343,26 @@ fn socket_env(socket_win: &str) -> Vec<(String, String)> {
 
 /// Discover live instances: tasklist PIDs whose `gui-sock-<pid>` file exists.
 /// Dead PIDs' stale socket files HANG on connect — this filter is load-bearing.
-pub async fn discover_sockets(runner: &dyn Runner) -> AppResult<Vec<String>> {
+#[cfg(not(target_os = "macos"))]
+pub async fn discover_sockets(runner: &dyn Runner) -> AppResult<(Vec<String>, PaneDiscoveryStats)> {
     let bytes = runner.run(&tasklist_spec()).await?;
     let pids = parse_tasklist_pids(&bytes);
     // /mnt/c (drvfs) stats can block for seconds — never on an async runtime worker. Resolving the
     // socket dir globs /mnt/c too (same drvfs cost), so it also happens here, cached per process.
     tokio::task::spawn_blocking(move || {
+        let mut stats = PaneDiscoveryStats::default();
         let Some(dir) = sock_dir() else {
-            return Vec::new(); // no wezterm dir on this box — degrade to the invoker's own instance
+            // no wezterm dir on this box — degrade to the invoker's own instance
+            return (Vec::new(), stats);
         };
-        pids.into_iter()
+        stats.sockets_found = count_gui_socks(&dir.wsl);
+        let live: Vec<String> = pids
+            .into_iter()
             .filter(|pid| dir.wsl.join(format!("gui-sock-{pid}")).is_file())
             .map(|pid| format!("{}\\gui-sock-{pid}", dir.win))
-            .collect()
+            .collect();
+        stats.sockets_stale = stats.sockets_found.saturating_sub(live.len());
+        (live, stats)
     })
     .await
     .map_err(|e| AppError::Subprocess {
@@ -351,23 +371,116 @@ pub async fn discover_sockets(runner: &dyn Runner) -> AppResult<Vec<String>> {
     })
 }
 
+/// Discover live instances on macOS: `gui-sock-<pid>` files across the candidate dirs
+/// ($WEZTERM_UNIX_SOCKET's parent seeds — never short-circuits — plus the default
+/// `~/.local/share/wezterm`), intersected with live `wezterm-gui` pids (the stale-hang guard,
+/// same invariant as WSL2) and scoped to the invoking user's sockets. No subprocess needed.
+/// Documented limitation: mux domains with a custom `socket_path` are not discovered.
+#[cfg(target_os = "macos")]
+pub async fn discover_sockets(
+    _runner: &dyn Runner,
+) -> AppResult<(Vec<String>, PaneDiscoveryStats)> {
+    use crate::platform::ProcFacts;
+    tokio::task::spawn_blocking(move || {
+        let mut stats = PaneDiscoveryStats::default();
+        let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+        if let Some(sock) = std::env::var_os("WEZTERM_UNIX_SOCKET") {
+            if let Some(parent) = std::path::Path::new(&sock).parent() {
+                dirs.push(parent.to_path_buf());
+            }
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            let default_dir = std::path::Path::new(&home).join(".local/share/wezterm");
+            if !dirs.contains(&default_dir) {
+                dirs.push(default_dir);
+            }
+        }
+        // Own uid via the home dir's owner — the crate forbids unsafe, so no geteuid().
+        let own_uid = std::env::var_os("HOME")
+            .and_then(|h| std::fs::metadata(h).ok())
+            .map(|m| std::os::unix::fs::MetadataExt::uid(&m));
+        let proc = crate::platform::provider();
+        let gui_pids: std::collections::HashSet<u32> = proc
+            .pids()
+            .into_iter()
+            .filter(|&pid| proc.comm(pid).is_some_and(|c| c == "wezterm-gui"))
+            .collect();
+        let mut sockets = Vec::new();
+        for dir in dirs {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let Some(pid) = name
+                    .to_str()
+                    .and_then(|n| n.strip_prefix("gui-sock-"))
+                    .and_then(|p| p.parse::<u32>().ok())
+                else {
+                    continue;
+                };
+                stats.sockets_found += 1;
+                let foreign = own_uid.is_some_and(|uid| {
+                    entry
+                        .metadata()
+                        .is_ok_and(|m| std::os::unix::fs::MetadataExt::uid(&m) != uid)
+                });
+                if foreign {
+                    stats.sockets_foreign_uid += 1;
+                    continue;
+                }
+                if !gui_pids.contains(&pid) {
+                    stats.sockets_stale += 1; // dead instance's socket — connecting can hang
+                    continue;
+                }
+                sockets.push(entry.path().to_string_lossy().into_owned());
+            }
+        }
+        sockets.sort();
+        sockets.dedup();
+        (sockets, stats)
+    })
+    .await
+    .map_err(|e| AppError::Subprocess {
+        program: WEZTERM.to_string(),
+        message: format!("socket discovery task: {e}"),
+    })
+}
+
+/// `gui-sock-*` entries in one dir (tally input; 0 when the dir is unreadable).
+#[cfg(not(target_os = "macos"))]
+fn count_gui_socks(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir).map_or(0, |entries| {
+        entries
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with("gui-sock-"))
+            .count()
+    })
+}
+
 /// Query every live instance and merge their Claude panes. Degrades per instance: a failing
 /// instance's error rides along as the lane note (the footer must say the pane lane is
 /// degraded — silence here blanks that instance's TAB/PANE with no explanation); only total
 /// failure (or discovery failure) is an error.
-pub async fn list_all_panes(runner: &dyn Runner) -> AppResult<(Vec<PaneRow>, Option<String>)> {
-    let sockets = discover_sockets(runner).await?;
+pub async fn list_all_panes(
+    runner: &dyn Runner,
+) -> AppResult<(Vec<PaneRow>, Option<String>, PaneDiscoveryStats)> {
+    let (sockets, mut stats) = discover_sockets(runner).await?;
     if sockets.is_empty() {
-        // No instance discovered (tasklist empty?) — fall back to the invoker's own instance.
-        return Ok((list_panes(runner, "").await?, None));
+        // No instance discovered — fall back to the invoker's own instance.
+        return Ok((list_panes(runner, "").await?, None, stats));
     }
     let queries = sockets.iter().map(|s| list_panes(runner, s));
-    merge_instance_results(futures::future::join_all(queries).await)
+    let (rows, first_err) =
+        merge_instance_results(futures::future::join_all(queries).await, &mut stats)?;
+    Ok((rows, first_err, stats))
 }
 
-/// Merge per-instance results: rows from every healthy instance + the first failure (if any).
+/// Merge per-instance results: rows from every healthy instance + the first failure (if any);
+/// each failing instance bumps `stats.instances_failed`.
 fn merge_instance_results(
     results: Vec<AppResult<Vec<PaneRow>>>,
+    stats: &mut PaneDiscoveryStats,
 ) -> AppResult<(Vec<PaneRow>, Option<String>)> {
     let mut merged = Vec::new();
     let mut any_ok = false;
@@ -379,6 +492,7 @@ fn merge_instance_results(
                 merged.append(&mut rows);
             }
             Err(e) => {
+                stats.instances_failed += 1;
                 if first_err.is_none() {
                     first_err = Some(e);
                 }
@@ -499,7 +613,7 @@ pub fn pick_focused_pane_id(clients: &[(u64, u64)]) -> Option<u64> {
 /// none is discovered, mirroring `list_all_panes`) and pick the least-idle client's focused pane
 /// (spec 009). Best-effort — an unreachable lane is `None`, never an error.
 pub async fn focused_pane_id(runner: &dyn Runner) -> Option<u64> {
-    let sockets = discover_sockets(runner).await.unwrap_or_default();
+    let (sockets, _stats) = discover_sockets(runner).await.unwrap_or_default();
     let sockets = if sockets.is_empty() {
         vec![String::new()]
     } else {
@@ -723,17 +837,24 @@ mod tests {
             })
         };
         // Partial: healthy rows AND the failing instance's error — the footer must not stay silent.
-        let (rows, err) =
-            merge_instance_results(vec![Ok(vec![row(1)]), timeout()]).expect("partial is Ok");
+        let mut stats = PaneDiscoveryStats::default();
+        let (rows, err) = merge_instance_results(vec![Ok(vec![row(1)]), timeout()], &mut stats)
+            .expect("partial is Ok");
         assert_eq!(rows.len(), 1);
         assert!(err.is_some_and(|e| e.contains("timed out")));
+        assert_eq!(stats.instances_failed, 1, "the failing instance is tallied");
         // Clean: no error.
+        let mut stats = PaneDiscoveryStats::default();
         let (rows, err) =
-            merge_instance_results(vec![Ok(vec![row(1)]), Ok(vec![row(2)])]).expect("clean merge");
+            merge_instance_results(vec![Ok(vec![row(1)]), Ok(vec![row(2)])], &mut stats)
+                .expect("clean merge");
         assert_eq!(rows.len(), 2);
         assert_eq!(err, None);
-        // Total failure: an error, not an empty success.
-        assert!(merge_instance_results(vec![timeout(), timeout()]).is_err());
+        assert_eq!(stats.instances_failed, 0);
+        // Total failure: an error, not an empty success — and both failures tallied.
+        let mut stats = PaneDiscoveryStats::default();
+        assert!(merge_instance_results(vec![timeout(), timeout()], &mut stats).is_err());
+        assert_eq!(stats.instances_failed, 2);
     }
 
     #[test]
@@ -782,7 +903,7 @@ mod tests {
     fn resolve_wezterm_prefers_path_then_absolute_fallback() {
         let tmp = std::env::temp_dir().join(format!("fleet-wez-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
-        let exe = tmp.join("wezterm.exe");
+        let exe = tmp.join(WEZTERM); // the per-target binary name — the PATH probe joins WEZTERM
 
         // Not on PATH, fallback file exists → absolute fallback wins.
         std::fs::write(&exe, b"").unwrap();
@@ -900,6 +1021,9 @@ garbage line\r\n";
         assert_eq!(pick_focused_pane_id(&[]), None);
     }
 
+    // WSL2-flow shape (tasklist → list-clients); macOS discovery scans real dirs, not the
+    // runner, so this sequence only holds on the Linux build.
+    #[cfg(not(target_os = "macos"))]
     #[tokio::test]
     async fn focused_pane_id_falls_back_to_own_instance_and_picks_the_focused_pane() {
         // Empty tasklist → no instances discovered → fall back to the invoker's own instance →
